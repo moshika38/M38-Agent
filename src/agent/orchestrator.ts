@@ -7,6 +7,10 @@ import { TaskRouter } from "./router.js";
 import { type ExecutionPlan, type OrchestratorResult, type FusionResult, type PipelineStage } from "../models/types.js";
 import { MODEL_POOLS, POOL_LABELS, type PoolName } from "../config/models.js";
 import { sessionManager } from "../session/manager.js";
+import { getToolSystemPrompt, parseToolCalls, executeToolCall, formatToolResults } from "./tools.js";
+import { pruneConversation } from "./contextManager.js";
+
+export type AgentMode = 'PLAN' | 'BUILD';
 
 export const M38_SYSTEM_PROMPT = `You are M38 Agent, an autonomous Multi-Agent AI Orchestrator and Smart Model Router.
 You are powered by a multi-model engine routing dynamically across Vision, Coding, Deep Reasoning, and Fast Execution tiers.
@@ -52,8 +56,11 @@ export class Orchestrator {
       forcePool?: string;
       signal?: AbortSignal;
       onRouting?: (model: string, pool: string, ms: number) => void;
+      mode?: AgentMode;
     } = {}
   ): Promise<OrchestratorResult> {
+    const mode = opts.mode ?? 'BUILD';
+    
     // ── @filepath context injection ──────────────────────────
     const { cleanPrompt, injectedContext, attachedImages } = this.extractFileContext(userPrompt);
 
@@ -65,13 +72,27 @@ export class Orchestrator {
       : cleanPrompt;
 
     // ── Intent routing (deterministic) ───────────────────────
-    const plan = opts.forceModel || opts.forcePool
+    let plan = opts.forceModel || opts.forcePool
       ? this.buildForcedPlan(opts.forceModel, opts.forcePool, hasImages)
       : this.router.analyze(fullPrompt, hasImages);
 
     if (hasImages && plan.task_type !== "image_to_code") {
       plan.task_type = "image_to_code";
       plan.needs_vision = true;
+    }
+
+    // ── Mode-specific routing override ────────────────────────
+    if (mode === 'PLAN') {
+      plan.task_type = "complex_reasoning";
+      plan.needs_deep_reasoning = true;
+      plan.needs_coding = false;
+      plan.needs_vision = false;
+      plan.complexity = "high";
+    } else if (mode === 'BUILD') {
+      plan.task_type = "deep_coding";
+      plan.needs_coding = true;
+      plan.needs_deep_reasoning = false;
+      plan.complexity = "medium";
     }
 
     // ── Select primary pool and model ────────────────────────
@@ -81,7 +102,8 @@ export class Orchestrator {
 
     // ── Display routing badge ────────────────────────────────
     if (!this.quiet) {
-      const badge = `\x1b[38;2;245;166;35m[◆ M38]\x1b[0m Task: ${poolLabel} \x1b[38;2;245;166;35m➔\x1b[0m Primary: ${primaryModel}`;
+      const modeBadge = mode === 'PLAN' ? '\x1b[36m[PLAN]\x1b[0m' : '\x1b[38;2;245;166;35m[BUILD]\x1b[0m';
+      const badge = `\x1b[38;2;245;166;35m[◆ M38]\x1b[0m ${modeBadge} Task: ${poolLabel} \x1b[38;2;245;166;35m➔\x1b[0m Primary: ${primaryModel}`;
       process.stdout.write(badge + '\n');
     }
 
@@ -90,7 +112,7 @@ export class Orchestrator {
 
     // ── Pipeline execution ───────────────────────────────────
     if (plan.pipeline && plan.pipeline.length > 0) {
-      const result = await this.executePipeline(fullPrompt, plan, { ...opts, images: allImages });
+      const result = await this.executePipeline(fullPrompt, plan, { ...opts, images: allImages, mode });
       sessionManager.addMessage('assistant', result.response);
       return result;
     }
@@ -99,14 +121,14 @@ export class Orchestrator {
     if (plan.task_type === "complex_reasoning" && plan.complexity === "high") {
       const fusionConfig = this.registry.getConfig().specialModes.fusion;
       if (fusionConfig?.pools) {
-        const result = await this.executeFusion(fullPrompt, plan, fusionConfig.pools, { ...opts, images: allImages });
+        const result = await this.executeFusion(fullPrompt, plan, fusionConfig.pools, { ...opts, images: allImages, mode });
         sessionManager.addMessage('assistant', result.response);
         return result;
       }
     }
 
     // ── Single model execution (default) ─────────────────────
-    const result = await this.executeSingle(fullPrompt, plan, { ...opts, images: allImages });
+    const result = await this.executeSingle(fullPrompt, plan, { ...opts, images: allImages, mode });
     sessionManager.addMessage('assistant', result.response);
     return result;
   }
@@ -187,6 +209,7 @@ export class Orchestrator {
       onStreamChunk?: (chunk: string) => void;
       signal?: AbortSignal;
       onRouting?: (model: string, pool: string, ms: number) => void;
+      mode?: AgentMode;
     }
   ): Promise<OrchestratorResult> {
     const stages = plan.pipeline!;
@@ -299,46 +322,201 @@ export class Orchestrator {
       onStreamChunk?: (chunk: string) => void;
       signal?: AbortSignal;
       onRouting?: (model: string, pool: string, ms: number) => void;
+      mode?: AgentMode;
     }
   ): Promise<OrchestratorResult> {
+    const mode = opts.mode ?? 'BUILD';
     const pool = this.selectPool(plan);
-    const systemPrompt = this.buildSystemPrompt(plan, opts.systemPrompt);
-    const messages = this.buildMessages(systemPrompt, userPrompt, opts.conversationHistory);
+    const systemPrompt = this.buildSystemPrompt(plan, opts.systemPrompt, mode);
+    const toolPrompt = mode === 'PLAN' ? systemPrompt : systemPrompt + "\n\n" + getToolSystemPrompt();
 
-    const invokeOpts: InvokeOptions = {
-      messages,
+    const prunedHistory = opts.conversationHistory
+      ? pruneConversation(opts.conversationHistory)
+      : [];
+
+    let messages = this.buildMessages(toolPrompt, userPrompt, prunedHistory);
+    const invokeOptsBase: Omit<InvokeOptions, "messages"> = {
       preferredPool: pool,
       temperature: plan.complexity === "low" ? 0.3 : 0.7,
       jsonMode: false,
       signal: opts.signal,
       onFallback: (from, to, reason) => {
         if (!this.quiet) {
-          const cleanReason = reason.replace(/ \(.+\)/, '');
+          const cleanReason = reason.replace(/ \(.+\)/, "");
           process.stdout.write(`\n\x1b[33m[⟳ Fallback] ${from} ➔ ${to} (${cleanReason})\x1b[0m\n`);
         }
       },
     };
 
-    let result;
-    if (opts.onStreamChunk) {
-      result = await this.invoker.invokeStreaming(invokeOpts, opts.onStreamChunk);
-    } else {
-      result = await this.invoker.invoke(invokeOpts);
+    const MAX_TOOL_ROUNDS = mode === 'PLAN' ? 0 : 5;
+    let finalResponse = "";
+    let lastModelUsed = "";
+    let lastPoolUsed = "";
+    let totalAttempts = 0;
+    let totalMs = 0;
+
+    for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
+      if (opts.signal?.aborted) break;
+
+      let result;
+      try {
+        if (opts.onStreamChunk) {
+          result = await this.invokeWithToolInterception(
+            { ...invokeOptsBase, messages },
+            opts.onStreamChunk
+          );
+        } else {
+          result = await this.invoker.invoke({ ...invokeOptsBase, messages });
+        }
+      } catch (err: unknown) {
+        if (opts.signal?.aborted || (err instanceof Error && (err.name === 'AbortError' || err.message?.includes('aborted')))) {
+          const abortErr = err instanceof Error ? err : new Error('Task was aborted.');
+          abortErr.name = 'AbortError';
+          throw abortErr;
+        }
+        const msg = err instanceof Error ? err.message : String(err);
+        if (!this.quiet) {
+          process.stdout.write(`\n\x1b[31m[!] Stream error: ${msg.slice(0, 120)}\x1b[0m\n`);
+        }
+        break;
+      }
+
+      totalAttempts += result.attempts;
+      totalMs += result.totalMs;
+      lastModelUsed = result.modelUsed;
+      lastPoolUsed = result.poolUsed;
+
+      const toolCalls = parseToolCalls(result.content);
+
+      if (toolCalls.length === 0) {
+        finalResponse = result.content;
+        break;
+      }
+
+      const toolResults = await Promise.all(toolCalls.map((tc) => executeToolCall(tc, mode)));
+
+      if (!this.quiet) {
+        for (let i = 0; i < toolCalls.length; i++) {
+          const tc = toolCalls[i];
+          const res = toolResults[i];
+          if (res && res.success) {
+            if (tc.name === "write_file" && tc.arguments.path) {
+              const isUpdate = res.content.includes("updated");
+              const badgePrefix = isUpdate ? "✔ Updated file:" : "✔ Created file:";
+              process.stdout.write(`\n\x1b[32m${badgePrefix} ${tc.arguments.path}\x1b[0m\n`);
+            } else if (tc.name === "read_file" && tc.arguments.path) {
+              process.stdout.write(`\n\x1b[36m✔ Read file: ${tc.arguments.path}\x1b[0m\n`);
+            } else if (tc.name === "execute_command" && tc.arguments.command) {
+              process.stdout.write(`\n\x1b[33m✔ Executed: ${tc.arguments.command}\x1b[0m\n`);
+            }
+          }
+        }
+      }
+
+      messages = [
+        ...messages,
+        { role: "assistant" as const, content: result.content },
+        { role: "user" as const, content: `Tool execution results:\n\n${formatToolResults(toolResults)}\n\nContinue your work based on these results.` },
+      ];
+
+      finalResponse = result.content;
+    }
+
+    // In PLAN mode, run one final pass without tools to get the plan output
+    if (mode === 'PLAN' && MAX_TOOL_ROUNDS === 0) {
+      try {
+        if (opts.onStreamChunk) {
+          const result = await this.invokeWithToolInterception(
+            { ...invokeOptsBase, messages },
+            opts.onStreamChunk
+          );
+          finalResponse = result.content;
+          lastModelUsed = result.modelUsed;
+          lastPoolUsed = result.poolUsed;
+          totalAttempts += result.attempts;
+          totalMs += result.totalMs;
+        } else {
+          const result = await this.invoker.invoke({ ...invokeOptsBase, messages });
+          finalResponse = result.content;
+          lastModelUsed = result.modelUsed;
+          lastPoolUsed = result.poolUsed;
+          totalAttempts += result.attempts;
+          totalMs += result.totalMs;
+        }
+      } catch (err: unknown) {
+        if (opts.signal?.aborted || (err instanceof Error && (err.name === 'AbortError' || err.message?.includes('aborted')))) {
+          const abortErr = err instanceof Error ? err : new Error('Task was aborted.');
+          abortErr.name = 'AbortError';
+          throw abortErr;
+        }
+        const msg = err instanceof Error ? err.message : String(err);
+        if (!this.quiet) {
+          process.stdout.write(`\n\x1b[31m[!] Stream error: ${msg.slice(0, 120)}\x1b[0m\n`);
+        }
+      }
     }
 
     if (opts.onRouting && !this.quiet) {
-      opts.onRouting(result.modelUsed, result.poolUsed, result.totalMs);
+      opts.onRouting(lastModelUsed, lastPoolUsed, totalMs);
     }
 
     return {
       plan,
-      response: result.content,
-      modelUsed: result.modelUsed,
-      poolUsed: result.poolUsed,
+      response: finalResponse,
+      modelUsed: lastModelUsed,
+      poolUsed: lastPoolUsed,
       primaryModel: this.getPrimaryModel(pool),
-      attempts: result.attempts,
-      totalMs: result.totalMs,
+      attempts: totalAttempts,
+      totalMs,
     };
+  }
+
+  private async invokeWithToolInterception(
+    invokeOpts: InvokeOptions,
+    onStreamChunk: (chunk: string) => void
+  ): Promise<{ content: string; modelUsed: string; poolUsed: string; attempts: number; totalMs: number }> {
+    let fullContent = "";
+    let inToolCallBlock = false;
+    let toolCallBuffer = "";
+    let conversationalBuffer = "";
+    let firstChunk = true;
+
+    const result = await this.invoker.invokeStreaming(invokeOpts, (chunk: string) => {
+      fullContent += chunk;
+
+      for (let i = 0; i < chunk.length; i++) {
+        const char = chunk[i];
+        const remaining = chunk.slice(i);
+
+        if (!inToolCallBlock && remaining.startsWith("```tool_call")) {
+          inToolCallBlock = true;
+          toolCallBuffer += "```tool_call";
+          i += "```tool_call".length - 1;
+          continue;
+        }
+
+        if (inToolCallBlock) {
+          toolCallBuffer += char;
+          if (remaining.startsWith("```")) {
+            inToolCallBlock = false;
+            toolCallBuffer += "```";
+            i += "```".length - 1;
+          }
+          continue;
+        }
+
+        conversationalBuffer += char;
+        if (firstChunk) {
+          firstChunk = false;
+        }
+        onStreamChunk(char);
+      }
+    });
+
+    if (!result.content.trim() && fullContent.trim()) {
+      return { ...result, content: fullContent.trim() };
+    }
+    return result;
   }
 
   /* ------------------------------------------------------------------ */
@@ -355,9 +533,11 @@ export class Orchestrator {
       systemPrompt?: string;
       signal?: AbortSignal;
       onRouting?: (model: string, pool: string, ms: number) => void;
+      mode?: AgentMode;
     }
   ): Promise<OrchestratorResult> {
-    const systemPrompt = this.buildSystemPrompt(plan, opts.systemPrompt);
+    const mode = opts.mode ?? 'BUILD';
+    const systemPrompt = this.buildSystemPrompt(plan, opts.systemPrompt, mode);
     const messages = this.buildMessages(systemPrompt, userPrompt, opts.conversationHistory);
 
     const promises = fusionPools.map(async (pool) => {
@@ -432,39 +612,63 @@ export class Orchestrator {
     return models?.[0] || "unknown";
   }
 
-  private buildSystemPrompt(plan: ExecutionPlan, custom?: string): string {
+  private buildSystemPrompt(plan: ExecutionPlan, custom?: string, mode?: AgentMode): string {
     const taskParts: string[] = [];
 
-    switch (plan.task_type) {
-      case "direct_fast":
-        taskParts.push("Give direct, accurate answers.");
-        break;
-      case "deep_coding":
-        taskParts.push(
-          "Write clean, production-ready code.",
-          "Follow best practices. Use proper error handling.",
-          "Output complete files with proper imports.",
-        );
-        if (plan.framework && plan.framework !== "none" && plan.framework !== "general_code") {
-          taskParts.push(`Specialize in ${plan.framework} development.`);
-        }
-        break;
-      case "image_to_code":
-        taskParts.push(
-          "Analyze the provided image and generate matching code.",
-          "Describe what you see, then provide the full implementation.",
-        );
-        break;
-      case "complex_reasoning":
-        taskParts.push(
-          "Break down complex problems step by step.",
-          "Consider multiple perspectives. Provide thorough, well-structured analysis.",
-        );
-        break;
-    }
+    if (mode === 'PLAN') {
+      taskParts.push(
+        "You are in PLAN MODE - acting as a Senior Software Architect.",
+        "",
+        "Your task is to analyze the request and produce a detailed implementation blueprint.",
+        "DO NOT write any code or execute any tools.",
+        "",
+        "Output Format:",
+        "📋 Architecture & Implementation Plan:",
+        "  1. Component Architecture & State Structure",
+        "  2. Step-by-step file changes (Files to create/modify)",
+        "  3. Edge cases and testing considerations",
+        "",
+        "💡 Switch to [BUILD] mode (Press Tab) to execute this plan.",
+        "",
+        "Guidelines:",
+        "- Be thorough and specific about file paths and component structure",
+        "- Consider existing codebase patterns and conventions",
+        "- Identify dependencies and integration points",
+        "- Address error handling, testing, and edge cases",
+        "- Output ONLY the plan - no conversational filler"
+      );
+    } else {
+      switch (plan.task_type) {
+        case "direct_fast":
+          taskParts.push("Give direct, accurate answers.");
+          break;
+        case "deep_coding":
+          taskParts.push(
+            "Write clean, production-ready code.",
+            "Follow best practices. Use proper error handling.",
+            "Output complete files with proper imports.",
+          );
+          if (plan.framework && plan.framework !== "none" && plan.framework !== "general_code") {
+            taskParts.push(`Specialize in ${plan.framework} development.`);
+          }
+          break;
+        case "image_to_code":
+          taskParts.push(
+            "Analyze the provided image and generate matching code.",
+            "Describe what you see, then provide the full implementation.",
+          );
+          break;
+        case "complex_reasoning":
+          taskParts.push(
+            "Break down complex problems step by step.",
+            "Consider multiple perspectives. Provide thorough, well-structured analysis.",
+          );
+          break;
+      }
 
-    if (plan.complexity === "high") {
-      taskParts.push("This is a complex task. Take your time and be thorough.");
+      if (plan.complexity === "high") {
+        taskParts.push("This is a complex task. Take your time and be thorough.");
+      }
     }
 
     if (custom) {

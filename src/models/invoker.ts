@@ -51,6 +51,11 @@ export class ModelInvoker {
     let rateLimitCount = 0;
 
     for (const { pool, modelId } of modelOrder) {
+      if (opts.signal?.aborted) {
+        const abortErr = new Error("Task was aborted.");
+        abortErr.name = "AbortError";
+        throw abortErr;
+      }
       if (attempted.has(modelId)) continue;
       attempted.add(modelId);
       attempts++;
@@ -86,7 +91,11 @@ export class ModelInvoker {
           totalMs: t.elapsed(),
         };
       } catch (err: unknown) {
-        if (this.isAbortError(err)) throw err;
+        if (opts.signal?.aborted || this.isAbortError(err)) {
+          const abortErr = err instanceof Error ? err : new Error("Task was aborted.");
+          abortErr.name = "AbortError";
+          throw abortErr;
+        }
         const reason = this.classifyError(err);
         errors.push(`${modelId}: ${reason}`);
 
@@ -123,6 +132,11 @@ export class ModelInvoker {
     let rateLimitCount = 0;
 
     for (const { pool, modelId } of modelOrder) {
+      if (opts.signal?.aborted) {
+        const abortErr = new Error("Task was aborted.");
+        abortErr.name = "AbortError";
+        throw abortErr;
+      }
       if (attempted.has(modelId)) continue;
       attempted.add(modelId);
       attempts++;
@@ -142,7 +156,11 @@ export class ModelInvoker {
 
         let fullContent = "";
         for await (const chunk of stream) {
-          if (opts.signal?.aborted) break;
+          if (opts.signal?.aborted) {
+            const abortErr = new Error("Task was aborted.");
+            abortErr.name = "AbortError";
+            throw abortErr;
+          }
           const delta = chunk.choices?.[0]?.delta?.content;
           if (delta) {
             fullContent += delta;
@@ -166,7 +184,11 @@ export class ModelInvoker {
           totalMs: t.elapsed(),
         };
       } catch (err: unknown) {
-        if (this.isAbortError(err)) throw err;
+        if (opts.signal?.aborted || this.isAbortError(err)) {
+          const abortErr = err instanceof Error ? err : new Error("Task was aborted.");
+          abortErr.name = "AbortError";
+          throw abortErr;
+        }
         const reason = this.classifyError(err);
         errors.push(`${modelId}: ${reason}`);
         const nextModel = modelOrder.find((m) => !attempted.has(m.modelId))?.modelId;

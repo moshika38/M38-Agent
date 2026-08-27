@@ -1,7 +1,73 @@
 {
   "id": "session_1787807335253_722ka",
-  "title": "Session 1",
+  "title": "hi",
   "createdAt": 1787807335254,
-  "updatedAt": 1787807335254,
-  "messages": []
+  "updatedAt": 1787842168105,
+  "messages": [
+    {
+      "role": "user",
+      "content": "hi",
+      "timestamp": 1787808688750
+    },
+    {
+      "role": "assistant",
+      "content": "I’m M38 Agent, your AI orchestrator. How can I assist you today?",
+      "timestamp": 1787808690508
+    },
+    {
+      "role": "user",
+      "content": "hi",
+      "timestamp": 1787808693785
+    },
+    {
+      "role": "assistant",
+      "content": "**M38 Agent** here – ready to route your request to the appropriate specialized model. How can I assist you today?",
+      "timestamp": 1787808695196
+    },
+    {
+      "role": "user",
+      "content": "write a js code for simple animation",
+      "timestamp": 1787808717031
+    },
+    {
+      "role": "assistant",
+      "content": "Below is a **stand‑alone HTML file** that contains a minimal, production‑ready JavaScript animation.  \nIt draws a bouncing ball on an HTML `<canvas>` using `requestAnimationFrame`.  \nAll the logic lives in a single `<script>` block, so you can copy the file and open it in any modern browser.\n\n```html\n<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n  <meta charset=\"UTF-8\">\n  <title>Simple Bouncing Ball Animation</title>\n  <style>\n    /* Center the canvas and give it a subtle border */\n    body {\n      display: flex;\n      justify-content: center;\n      align-items: center;\n      height: 100vh;\n      margin: 0;\n      background: #f0f0f0;\n    }\n    canvas {\n      background: #ffffff;\n      border: 2px solid #333;\n    }\n  </style>\n</head>\n<body>\n  <canvas id=\"animCanvas\" width=\"600\" height=\"400\"></canvas>\n\n  <script>\n    // --------------------------------------------------------------\n    // Configuration\n    // --------------------------------------------------------------\n    const config = {\n      ballRadius: 20,\n      ballColor: '#ff5722',\n      gravity: 0.6,          // acceleration (px/frame²)\n      friction: 0.98,       // energy loss on bounce (0‑1)\n      startX: 100,\n      startY: 100,\n      startVX: 4,\n      startVY: 0\n    };\n\n    // --------------------------------------------------------------\n    // Canvas setup\n    // --------------------------------------------------------------\n    const canvas = document.getElementById('animCanvas');\n    const ctx = canvas.getContext('2d');\n\n    // --------------------------------------------------------------\n    // Ball state\n    // --------------------------------------------------------------\n    const ball = {\n      x: config.startX,\n      y: config.startY,\n      vx: config.startVX,\n      vy: config.startVY,\n      radius: config.ballRadius,\n      color: config.ballColor\n    };\n\n    // --------------------------------------------------------------\n    // Helper: draw a filled circle\n    // --------------------------------------------------------------\n    function drawBall({ x, y, radius, color }) {\n      ctx.beginPath();\n      ctx.arc(x, y, radius, 0, Math.PI * 2);\n      ctx.fillStyle = color;\n      ctx.fill();\n      ctx.closePath();\n    }\n\n    // --------------------------------------------------------------\n    // Main animation loop\n    // --------------------------------------------------------------\n    function animate() {\n      // Clear the canvas\n      ctx.clearRect(0, 0, canvas.width, canvas.height);\n\n      // Apply physics\n      ball.vy += config.gravity;          // gravity\n      ball.x += ball.vx;\n      ball.y += ball.vy;\n\n      // Collision detection – floor\n      if (ball.y + ball.radius > canvas.height) {\n        ball.y = canvas.height - ball.radius;\n        ball.vy *= -config.friction;     // reverse & dampen\n        ball.vx *= config.friction;      // optional horizontal friction\n      }\n\n      // Collision detection – ceiling\n      if (ball.y - ball.radius < 0) {\n        ball.y = ball.radius;\n        ball.vy *= -config.friction;\n      }\n\n      // Collision detection – walls\n      if (ball.x + ball.radius > canvas.width) {\n        ball.x = canvas.width - ball.radius;\n        ball.vx *= -config.friction;\n      }\n      if (ball.x - ball.radius < 0) {\n        ball.x = ball.radius;\n        ball.vx *= -config.friction;\n      }\n\n      // Render\n      drawBall(ball);\n\n      // Queue next frame\n      requestAnimationFrame(animate);\n    }\n\n    // Kick‑off\n    requestAnimationFrame(animate);\n  </script>\n</body>\n</html>\n```\n\n### How it works\n1. **Configuration** – All tunable parameters (size, colors, physics) are stored in a single `config` object for easy tweaking.\n2. **Physics** – Each frame we add gravity to the vertical velocity, then move the ball. When the ball hits a boundary we invert the velocity and apply a `friction` factor to simulate energy loss.\n3. **Rendering** – The canvas is cleared, then the ball is drawn with `arc` and `fill`.\n4. **Animation loop** – `requestAnimationFrame` provides a smooth 60 fps loop that automatically throttles when the tab is hidden.\n\nYou can drop this file into any web project, adjust the `config` values, or extend the logic (e.g., add multiple balls, user interaction, etc.). Enjoy!",
+      "timestamp": 1787808730023
+    },
+    {
+      "role": "user",
+      "content": "hi",
+      "timestamp": 1787808918489
+    },
+    {
+      "role": "assistant",
+      "content": "I’m M38 Agent – an AI orchestrator that routes tasks to the most suitable specialized model. How can I assist you today?",
+      "timestamp": 1787808920302
+    },
+    {
+      "role": "user",
+      "content": "write beautiful html,css.js webpage for qr code genorating. must be beautifull one",
+      "timestamp": 1787808961966
+    },
+    {
+      "role": "assistant",
+      "content": "I'll create a beautiful QR code generator webpage with HTML, CSS, and JavaScript. Let me first create the files and then we can implement the functionality.\n\n```tool_call\n{\n  \"name\": \"write_file\",\n  \"arguments\": {\n    \"path\": \"index.html\",\n    \"content\": \"<!DOCTYPE html>\\n<html lang=\\\"en\\\">\\n<head>\\n    <meta charset=\\\"UTF-8\\\">\\n    <meta name=\\\"viewport\\\" content=\\\"width=device-width, initial-scale=1.0\\\">\\n    <title>QR Code Generator</title>\\n    <link rel=\\\"stylesheet\\\" href=\\\"styles.css\\\">\\n</head>\\n<body>\\n    <div class=\\\"container\\\">\\n        <h1>QR Code Generator</h1>\\n        <div class=\\\"input-container\\\">\\n            <input type=\\\"text\\\" id=\\\"text-input\\\" placeholder=\\\"Enter text or URL\\\">\\n            <button id=\\\"generate-btn\\\">Generate QR Code</button>\\n        </div>\\n        <div class=\\\"qr-container\\\">\\n            <div id=\\\"qr-code\\\"></div>\\n        </div>\\n        <div class=\\\"download-container\\\">\\n            <button id=\\\"download-btn\\\">Download QR Code</button>\\n        </div>\\n    </div>\\n    <script src=\\\"script.js\\\"></script>\\n</body>\\n</html>\"\n  }\n}\n```\n\n```tool_call\n{\n  \"name\": \"write_file\",\n  \"arguments\": {\n    \"path\": \"styles.css\",\n    \"content\": \"body {\\n    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;\\n    background: linear-gradient(135deg, #6e8efb, #a777e3);\\n    margin: 0;\\n    padding: 0;\\n    min-height: 100vh;\\n    display: flex;\\n    justify-content: center;\\n    align-items: center;\\n    color: #fff;\\n}\\n\\n.container {\\n    background-color: rgba(255, 255, 255, 0.1);\\n    backdrop-filter: blur(10px);\\n    border-radius: 20px;\\n    padding: 30px;\\n    width: 90%;\\n    max-width: 500px;\\n    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.2);\\n    text-align: center;\\n}\\n\\n.container h1 {\\n    margin-bottom: 30px;\\n    font-size: 2.5rem;\\n    color: #fff;\\n    text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.3);\\n}\\n\\n.input-container {\\n    display: flex;\\n    flex-direction: column;\\n    gap: 15px;\\n    margin-bottom: 30px;\\n}\\n\\n.input-container input {\\n    padding: 15px;\\n    border: none;\\n    border-radius: 10px;\\n    font-size: 1rem;\\n    outline: none;\\n    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);\\n}\\n\\n.input-container button {\\n    padding: 15px;\\n    background: linear-gradient(45deg, #ff9a9e, #fad0c4);\\n    color: #fff;\\n    border: none;\\n    border-radius: 10px;\\n    font-size: 1rem;\\n    cursor: pointer;\\n    transition: all 0.3s ease;\\n    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);\\n}\\n\\n.input-container button:hover {\\n    transform: translateY(-2px);\\n    box-shadow: 0 6px 8px rgba(0, 0, 0, 0.15);\\n}\\n\\n.qr-container {\\n    background-color: #fff;\\n    border-radius: 15px;\\n    padding: 20px;\\n    margin-bottom: 20px;\\n    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);\\n    display: flex;\\n    justify-content: center;\\n    align-items: center;\\n    min-height: 200px;\\n}\\n\\n.download-container {\\n    margin-top: 20px;\\n}\\n\\n.download-container button {\\n    padding: 12px 25px;\\n    background: linear-gradient(45deg, #a1c4fd, #c2e9fb);\\n    color: #fff;\\n    border: none;\\n    border-radius: 10px;\\n    font-size: 1rem;\\n    cursor: pointer;\\n    transition: all 0.3s ease;\\n    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);\\n}\\n\\n.download-container button:hover {\\n    transform: translateY(-2px);\\n    box-shadow: 0 6px 8px rgba(0, 0, 0, 0.15);\\n}\"\n  }\n}\n```\n\n```tool_call\n{\n  \"name\": \"write_file\",\n  \"arguments\": {\n    \"path\": \"script.js\",\n    \"content\": \"// Import the QRCode library\\nimport QRCode from 'https://cdn.skypack.dev/qrcode@1.5.3';\\n\\n// DOM elements\\nconst textInput = document.getElementById('text-input');\\nconst generateBtn = document.getElementById('generate-btn');\\nconst qrCodeContainer = document.getElementById('qr-code');\\nconst downloadBtn = document.getElementById('download-btn');\\n\\n// Variables\\nlet qrCode;\\n\\n// Function to generate QR code\\nfunction generateQRCode() {\\n    const text = textInput.value.trim();\\n\\n    if (!text) {\\n        alert('Please enter text or URL');\\n        return;\\n    }\\n\\n    // Clear previous QR code\\n    qrCodeContainer.innerHTML = '';\\n\\n    // Generate new QR code\\n    qrCode = new QRCode(qrCodeContainer, {\\n        text: text,\\n        width:",
+      "timestamp": 1787808972471
+    },
+    {
+      "role": "user",
+      "content": "hi",
+      "timestamp": 1787841633784
+    },
+    {
+      "role": "user",
+      "content": "hi",
+      "timestamp": 1787842163618
+    },
+    {
+      "role": "user",
+      "content": "hhh",
+      "timestamp": 1787842168105
+    }
+  ]
 }

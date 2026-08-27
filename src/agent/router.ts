@@ -1,87 +1,87 @@
-import type { ExecutionPlan } from "../models/types.js";
+import { MODEL_POOLS } from '../config/models.js';
+import type { ExecutionPlan } from '../models/types.js';
 
-const IMAGE_EXT = /\.(png|jpe?g|webp|svg|gif|bmp)$/i;
-const CODE_EXT = /\.(ts|tsx|js|jsx|dart|py|rb|go|rs|java|kt|json|yaml|yml|toml|html|css|scss|sh|sql)$/i;
+export type TaskTier = 'vision' | 'coding' | 'reasoning' | 'fast';
 
-const VISION_KEYWORDS = /\b(screenshot|ui design|mockup|wireframe|layout|界面|截图|设计图)\b/i;
+const CODING_REGEX = /\b(code|coding|script|js|ts|javascript|typescript|dart|flutter|python|html|css|react|vue|node|function|class|api|endpoint|sql|database|query|debug|fix|refactor|animation|component|algorithm|widget|json|regex|write|create|build|implement|generate|snippet|program)\b/i;
+const REASONING_REGEX = /\b(architecture|system design|schema|benchmark|compare deep|step by step proof|math proof|complex logic|trade.?off|design pattern|strategy)\b/i;
 
-const CODING_KEYWORDS = /\b(function|class|const |import |export |def |fn |pub |async |await |return |flutter|widget|react|vue|angular|bug|error|fix|implement|refactor|debug|component|typescript|dart|python|javascript|api|endpoint|sql|query|database schema|algorithm|compile|build|test|lint|deploy|npm|pub |cargo |pip )\b/i;
-const CODE_BLOCK = /```/;
+export function classifyIntent(prompt: string, hasImageAttachment: boolean = false): { tier: TaskTier; primaryModel: string; fallbackPool: string[] } {
+  if (hasImageAttachment) {
+    return { tier: 'vision', primaryModel: MODEL_POOLS.vision[0]!, fallbackPool: MODEL_POOLS.vision.slice(1) };
+  }
 
-const REASONING_KEYWORDS = /\b(analyze|compare|explain why|pros and cons|step by step|reason|architecture|system design|database schema|design pattern|trade.?off|evaluate|complex algorithm|proof|logic|multi.?step|plan|strategy|break down|deep dive|thorough|comprehensive|elaborate|detailed analysis)\b/i;
+  if (CODING_REGEX.test(prompt)) {
+    return { tier: 'coding', primaryModel: MODEL_POOLS.coding[0]!, fallbackPool: [...MODEL_POOLS.coding.slice(1), ...MODEL_POOLS.fast] };
+  }
 
-const FAST_KEYWORDS = /^(hi|hello|hey|yo|sup|thanks|thank you|bye|quit|ok|yes|no|what is|who is|when|where|how to|define|meaning of|translate|summarize|list|name)\s/i;
+  if (REASONING_REGEX.test(prompt)) {
+    return { tier: 'reasoning', primaryModel: MODEL_POOLS.reasoning[0]!, fallbackPool: [...MODEL_POOLS.reasoning.slice(1), ...MODEL_POOLS.fast] };
+  }
+
+  return { tier: 'fast', primaryModel: MODEL_POOLS.fast[0]!, fallbackPool: MODEL_POOLS.fast.slice(1) };
+}
+
+function detectFramework(lower: string): "react" | "flutter" | "general_code" | "none" {
+  if (/\b(react|next\.?js|jsx|tsx)\b/.test(lower)) return "react";
+  if (/\b(flutter|dart|widget|material|cupertino)\b/.test(lower)) return "flutter";
+  return "general_code";
+}
 
 export class TaskRouter {
   analyze(userPrompt: string, hasImages: boolean = false): ExecutionPlan {
+    const intent = classifyIntent(userPrompt, hasImages);
     const lower = userPrompt.toLowerCase();
     const wordCount = userPrompt.trim().split(/\s+/).length;
 
-    // ── Vision tier ──────────────────────────────────────────
-    if (hasImages || IMAGE_EXT.test(userPrompt) || VISION_KEYWORDS.test(userPrompt)) {
-      const hasCodeInImageRequest = CODING_KEYWORDS.test(userPrompt) || CODE_BLOCK.test(userPrompt);
-      return {
-        task_type: "image_to_code",
-        needs_vision: true,
-        needs_coding: hasCodeInImageRequest,
-        needs_deep_reasoning: false,
-        complexity: hasCodeInImageRequest ? "medium" : "low",
-        summary: "Image analysis request",
-      };
+    const isComplex =
+      intent.tier === 'reasoning' ||
+      lower.includes("architect") ||
+      lower.includes("system design") ||
+      lower.includes("refactor") ||
+      lower.includes("optimiz") ||
+      wordCount > 50;
+
+    const framework = intent.tier === 'coding' ? detectFramework(lower) : "none";
+
+    switch (intent.tier) {
+      case 'vision':
+        return {
+          task_type: "image_to_code",
+          needs_vision: true,
+          needs_coding: CODING_REGEX.test(userPrompt),
+          needs_deep_reasoning: false,
+          complexity: "medium",
+          summary: "Image analysis request",
+        };
+      case 'coding':
+        return {
+          task_type: "deep_coding",
+          needs_vision: false,
+          needs_coding: true,
+          needs_deep_reasoning: isComplex,
+          complexity: isComplex ? "high" : "medium",
+          framework,
+          summary: "Code generation or modification request",
+        };
+      case 'reasoning':
+        return {
+          task_type: "complex_reasoning",
+          needs_vision: false,
+          needs_coding: false,
+          needs_deep_reasoning: true,
+          complexity: wordCount > 80 ? "high" : "medium",
+          summary: "Complex analysis or reasoning request",
+        };
+      default:
+        return {
+          task_type: "direct_fast",
+          needs_vision: false,
+          needs_coding: false,
+          needs_deep_reasoning: false,
+          complexity: wordCount <= 12 ? "low" : "medium",
+          summary: "Quick query or direct answer",
+        };
     }
-
-    // ── Coding tier ──────────────────────────────────────────
-    const hasCode = CODE_BLOCK.test(userPrompt) || CODING_KEYWORDS.test(userPrompt) || CODE_EXT.test(userPrompt);
-    if (hasCode) {
-      const isComplex =
-        REASONING_KEYWORDS.test(userPrompt) ||
-        lower.includes("architect") ||
-        lower.includes("system design") ||
-        lower.includes("refactor") ||
-        lower.includes("optimiz") ||
-        userPrompt.split("\n").length > 20 ||
-        wordCount > 60;
-
-      const framework = this.detectFramework(lower);
-
-      return {
-        task_type: "deep_coding",
-        needs_vision: false,
-        needs_coding: true,
-        needs_deep_reasoning: isComplex,
-        complexity: isComplex ? "high" : "medium",
-        framework,
-        summary: "Code generation or modification request",
-      };
-    }
-
-    // ── Reasoning tier ───────────────────────────────────────
-    if (REASONING_KEYWORDS.test(userPrompt) || wordCount > 50) {
-      return {
-        task_type: "complex_reasoning",
-        needs_vision: false,
-        needs_coding: false,
-        needs_deep_reasoning: true,
-        complexity: wordCount > 80 ? "high" : "medium",
-        summary: "Complex analysis or reasoning request",
-      };
-    }
-
-    // ── Fast tier (default) ──────────────────────────────────
-    const isTrivial = wordCount <= 12 || FAST_KEYWORDS.test(userPrompt);
-    return {
-      task_type: "direct_fast",
-      needs_vision: false,
-      needs_coding: false,
-      needs_deep_reasoning: false,
-      complexity: isTrivial ? "low" : "medium",
-      summary: "Quick query or direct answer",
-    };
-  }
-
-  private detectFramework(lower: string): "react" | "flutter" | "general_code" | "none" {
-    if (/\b(react|next\.?js|jsx|tsx)\b/.test(lower)) return "react";
-    if (/\b(flutter|dart|widget|material|cupertino)\b/.test(lower)) return "flutter";
-    return "general_code";
   }
 }

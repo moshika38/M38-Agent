@@ -1,18 +1,22 @@
 #!/usr/bin/env node
 import 'dotenv/config';
 import readline from 'node:readline';
+import { mkdirSync, writeFileSync, existsSync } from 'node:fs';
+import { join } from 'node:path';
 import chalk from 'chalk';
 import { Orchestrator } from './agent/orchestrator.js';
 import { M38_BANNER } from './utils/banner.js';
+import { highlightMarkdown } from './utils/highlighter.js';
 import { sessionManager } from './session/manager.js';
 import { MODEL_POOLS } from './config/models.js';
 
+export type AgentMode = 'PLAN' | 'BUILD';
+let currentMode: AgentMode = 'BUILD';
 
 const orchestrator = new Orchestrator({
   baseURL: process.env.FREELLM_BASE_URL || 'http://localhost:3001/v1',
   apiKey: process.env.FREELLM_API_KEY || '',
 });
-
 
 const COMMANDS = [
   { cmd: '/exit', desc: 'Quit M38 Agent Orchestrator' },
@@ -20,13 +24,14 @@ const COMMANDS = [
   { cmd: '/pools', desc: 'Inspect active model pools' },
   { cmd: '/new', desc: 'Start a fresh conversation session' },
   { cmd: '/sessions', desc: 'Browse, switch and delete saved sessions' },
+  { cmd: '/export', desc: 'Export active session as Markdown file' },
   { cmd: '/help', desc: 'View available commands guide' }
 ];
-
 
 let inputBuffer = '';
 let selectedCmdIdx = 0;
 let lastPopupLineCount = 0;
+let isBoxRendered = false;
 
 let isBrowsingSessions = false;
 let sessionCursorIdx = 0;
@@ -34,19 +39,22 @@ let lastSessionViewLineCount = 0;
 
 let isExecuting = false;
 let currentAbortController: AbortController | null = null;
-let escTimer: NodeJS.Timeout | null = null;
 
+function getBoxColor(): (str: string) => string {
+  return currentMode === 'BUILD' ? chalk.hex('#F5A623') : chalk.hex('#38BDF8');
+}
 
-const PROMPT_LABEL = chalk.hex('#F5A623')('Ask anything > ');
-const PROMPT_RAW = 'Ask anything > ';
-
+function getBoxWidth(): number {
+  const cols = process.stdout.columns || 80;
+  return Math.max(40, Math.min(cols, 80));
+}
 
 function resetScreen() {
   process.stdout.write('\x1b[2J\x1b[3J\x1b[H');
   console.log(M38_BANNER);
-  console.log(chalk.gray('  Type / for commands, @ for files. Type /exit to quit.\n'));
+  console.log(chalk.gray('  Type / for commands, @ for files. Type /exit to quit.'));
+  console.log(chalk.gray('  [Tab / F2] Toggle Plan/Build Mode\n'));
 }
-
 
 function getCmdMatches() {
   if (!inputBuffer.startsWith('/')) return [];
@@ -54,18 +62,24 @@ function getCmdMatches() {
   return COMMANDS.filter(c => c.cmd.toLowerCase().startsWith(q));
 }
 
+function eraseInputBox() {
+  if (!isBoxRendered) return;
 
-function erasePopupLines() {
-  if (lastPopupLineCount > 0) {
-    for (let i = 0; i < lastPopupLineCount; i++) {
+  const totalLinesToClear = 3 + lastPopupLineCount;
+  readline.moveCursor(process.stdout, 0, -1);
+
+  for (let i = 0; i < totalLinesToClear; i++) {
+    readline.cursorTo(process.stdout, 0);
+    readline.clearLine(process.stdout, 0);
+    if (i < totalLinesToClear - 1) {
       readline.moveCursor(process.stdout, 0, 1);
-      readline.clearLine(process.stdout, 0);
     }
-    readline.moveCursor(process.stdout, 0, -lastPopupLineCount);
-    lastPopupLineCount = 0;
   }
-}
 
+  readline.moveCursor(process.stdout, 0, -(totalLinesToClear - 1));
+  isBoxRendered = false;
+  lastPopupLineCount = 0;
+}
 
 function eraseSessionModal() {
   if (lastSessionViewLineCount > 0) {
@@ -77,7 +91,6 @@ function eraseSessionModal() {
     lastSessionViewLineCount = 0;
   }
 }
-
 
 function renderSessionBrowser() {
   readline.clearLine(process.stdout, 0);
@@ -113,38 +126,76 @@ function renderSessionBrowser() {
   readline.cursorTo(process.stdout, 0);
 }
 
+function renderBoxLines(): { top: string; mid: string; bot: string; cursorCol: number } {
+  const width = getBoxWidth();
+  const color = getBoxColor();
+
+  const title = 'Ask anything';
+  const topFillLen = Math.max(0, width - 2 - (title.length + 3));
+  const top = color('┌─ ') + chalk.bold.white(title) + color(' ' + '─'.repeat(topFillLen) + '┐');
+
+  const maxTextLen = Math.max(1, width - 6);
+  let visibleText = inputBuffer;
+  let cursorOffset = inputBuffer.length;
+  if (inputBuffer.length > maxTextLen) {
+    visibleText = inputBuffer.slice(inputBuffer.length - maxTextLen);
+    cursorOffset = maxTextLen;
+  }
+  const padLen = Math.max(0, maxTextLen - visibleText.length);
+  const mid = color('│') + ' > ' + visibleText + ' '.repeat(padLen) + color(' │');
+
+  const badgeRaw = currentMode === 'BUILD'
+    ? '[BUILD Mode] (Press Tab to Plan)'
+    : '[PLAN Mode] (Press Tab to Build)';
+  const badgeStyled = currentMode === 'BUILD'
+    ? chalk.hex('#F5A623').bold(badgeRaw)
+    : chalk.hex('#38BDF8').bold(badgeRaw);
+
+  const botFillLen = Math.max(1, width - 6 - badgeRaw.length);
+  const bot = color('└' + '─'.repeat(botFillLen) + ' ') + badgeStyled + color(' ─┘');
+
+  return {
+    top,
+    mid,
+    bot,
+    cursorCol: 4 + cursorOffset,
+  };
+}
 
 function renderInput() {
-  readline.clearLine(process.stdout, 0);
-  readline.cursorTo(process.stdout, 0);
-  process.stdout.write(PROMPT_LABEL + inputBuffer);
+  eraseInputBox();
 
-  erasePopupLines();
+  const { top, mid, bot, cursorCol } = renderBoxLines();
+
+  process.stdout.write(top + '\n');
+  process.stdout.write(mid + '\n');
+  process.stdout.write(bot);
+  isBoxRendered = true;
 
   const matches = getCmdMatches();
   if (matches.length > 0) {
     if (selectedCmdIdx >= matches.length) selectedCmdIdx = 0;
     if (selectedCmdIdx < 0) selectedCmdIdx = matches.length - 1;
 
-    process.stdout.write('\n');
     matches.forEach((item, idx) => {
       const isSel = idx === selectedCmdIdx;
       const arrow = isSel ? chalk.hex('#F5A623')('➔ ') : '  ';
       const cmdStr = isSel ? chalk.hex('#F5A623').bold(item.cmd) : chalk.white(item.cmd);
-      process.stdout.write(`${arrow}${cmdStr} ${chalk.gray(item.desc)}\n`);
+      process.stdout.write('\n' + `${arrow}${cmdStr} ${chalk.gray(item.desc)}`);
     });
 
-    readline.moveCursor(process.stdout, 0, -(matches.length + 1));
-    readline.cursorTo(process.stdout, PROMPT_RAW.length + inputBuffer.length);
     lastPopupLineCount = matches.length;
+    readline.moveCursor(process.stdout, 0, -(lastPopupLineCount + 1));
+    readline.cursorTo(process.stdout, cursorCol);
   } else {
-    readline.cursorTo(process.stdout, PROMPT_RAW.length + inputBuffer.length);
+    lastPopupLineCount = 0;
+    readline.moveCursor(process.stdout, 0, -1);
+    readline.cursorTo(process.stdout, cursorCol);
   }
 }
 
-
 async function runCommandOrQuery(target: string) {
-  erasePopupLines();
+  eraseInputBox();
   process.stdout.write('\n');
   const action = target.trim();
 
@@ -187,6 +238,38 @@ async function runCommandOrQuery(target: string) {
     return;
   }
 
+  if (action === '/export') {
+    const session = sessionManager.getCurrentSession();
+    if (!session || session.messages.length === 0) {
+      console.log(chalk.yellow('  No active session with messages to export.\n'));
+      inputBuffer = '';
+      renderInput();
+      return;
+    }
+
+    const exportDir = join(process.cwd(), 'exports');
+    if (!existsSync(exportDir)) {
+      mkdirSync(exportDir, { recursive: true });
+    }
+
+    const fileName = `${session.id}.md`;
+    const filePath = join(exportDir, fileName);
+
+    let md = `# ${session.title}\n\n`;
+    md += `> Exported from M38 Agent · ${new Date().toISOString().split('T')[0]}\n\n---\n\n`;
+
+    for (const msg of session.messages) {
+      const role = msg.role === 'user' ? '**You**' : '**M38 Agent**';
+      md += `### ${role}\n\n${msg.content}\n\n---\n\n`;
+    }
+
+    writeFileSync(filePath, md, 'utf-8');
+    console.log(chalk.green(`✔ Exported session to: ./exports/${fileName}\n`));
+    inputBuffer = '';
+    renderInput();
+    return;
+  }
+
   if (action === '/help') {
     console.log(chalk.cyan('\nAvailable Commands:'));
     COMMANDS.forEach(c => console.log(`  ${c.cmd.padEnd(12)} - ${c.desc}`));
@@ -202,24 +285,46 @@ async function runCommandOrQuery(target: string) {
   try {
     process.stdout.write(chalk.gray('⠋ thinking...\r'));
     let first = true;
+    let buffer = '';
 
     await orchestrator.process(action, {
       signal: currentAbortController.signal,
+      mode: currentMode,
       onStreamChunk: (chunk: string) => {
         if (first) {
           readline.clearLine(process.stdout, 0);
           readline.cursorTo(process.stdout, 0);
           first = false;
         }
+        buffer += chunk;
+
+        const codeBlockMatch = buffer.match(/```[\s\S]*?$/);
+        if (codeBlockMatch && !buffer.slice(0, -chunk.length).includes('```')) {
+          process.stdout.write(chunk);
+          return;
+        }
+
+        if (buffer.includes('```') && (buffer.match(/```/g)?.length ?? 0) % 2 === 0) {
+          process.stdout.write(highlightMarkdown(buffer));
+          buffer = '';
+          return;
+        }
+
         process.stdout.write(chunk);
       }
     });
 
+    if (buffer.trim()) {
+      process.stdout.write(highlightMarkdown(buffer));
+    }
+
     process.stdout.write('\n\n');
   } catch (err: any) {
-    if (err.name === 'AbortError') {
-      console.log(chalk.red('\n✖ Task cancelled.\n'));
-    } else {
+    const isAbort =
+      err.name === 'AbortError' ||
+      err.message?.includes('aborted') ||
+      err.message === 'Task was aborted.';
+    if (!isAbort) {
       console.log(chalk.red(`\n✖ Error: ${err.message}\n`));
     }
   } finally {
@@ -230,17 +335,22 @@ async function runCommandOrQuery(target: string) {
   }
 }
 
-
 readline.emitKeypressEvents(process.stdin);
 if (process.stdin.isTTY) {
   process.stdin.setRawMode(true);
 }
 
+process.stdout.on('resize', () => {
+  if (!isExecuting && !isBrowsingSessions) {
+    renderInput();
+  }
+});
+
 process.stdin.on('keypress', async (str, key) => {
   if (!key) return;
 
   if (key.ctrl && key.name === 'c') {
-    erasePopupLines();
+    eraseInputBox();
     eraseSessionModal();
     process.stdout.write('\n');
     process.exit(0);
@@ -303,16 +413,20 @@ process.stdin.on('keypress', async (str, key) => {
 
   /* ── Executing state ─────────────────────────────────────── */
   if (isExecuting) {
-    if (key.name === 'escape') {
-      if (escTimer) {
-        clearTimeout(escTimer);
-        escTimer = null;
-        currentAbortController?.abort();
-      } else {
-        process.stdout.write(chalk.yellow('\n[Press ESC again within 2s to cancel]'));
-        escTimer = setTimeout(() => { escTimer = null; }, 2000);
+    if (key && (key.name === 'escape' || str === '\u001b')) {
+      if (currentAbortController) {
+        currentAbortController.abort();
+        process.stdout.write(chalk.red('\n✖ Task cancelled by user.\n\n'));
       }
+      return;
     }
+  }
+
+  /* ── Mode Toggle (Tab / F2 when buffer empty) ────────────────── */
+  const isModeToggleKey = key.name === 'tab' || key.name === 'f2' || str === '\u001bOQ' || str === '\u001b[12~';
+  if (isModeToggleKey && inputBuffer === '') {
+    currentMode = currentMode === 'BUILD' ? 'PLAN' : 'BUILD';
+    renderInput();
     return;
   }
 
@@ -370,7 +484,6 @@ process.stdin.on('keypress', async (str, key) => {
     renderInput();
   }
 });
-
 
 resetScreen();
 renderInput();

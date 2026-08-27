@@ -6,29 +6,28 @@ export interface ModelPoolConfig {
 }
 
 export const MODEL_POOLS: ModelPoolConfig = {
-  vision: [
-    'gemini-3.5-flash',
-    'gemini-3-flash-preview',
-    'llama-4-scout',
-    'gemini-2.5-flash'
-  ],
   coding: [
-    'qwen3-coder-next',
-    'qwen3-coder-480b',
-    'devstral-2-123b',
-    'codestral'
+    'codestral',
+    'mistral-large-3',
+    'gpt-oss-120b',
+    'glm-4.7-flash'
   ],
   reasoning: [
     'cogito-2.1-671b',
-    'deepseek-v4-pro',
-    'minimax-m2.7',
-    'kimi-k2.6'
+    'mistral-medium-3.5',
+    'gpt-oss-120b',
+    'glm-4.7'
+  ],
+  vision: [
+    'gemini-3.5-flash',
+    'llama-4-scout',
+    'gemini-2.5-flash'
   ],
   fast: [
     'gpt-oss-120b',
     'glm-4.7-flash',
-    'qwen3-30b-a3b-fp8',
-    'mistral-medium-3.5'
+    'mistral-medium-3.5',
+    'qwen3-30b-a3b'
   ]
 };
 
