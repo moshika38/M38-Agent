@@ -1,19 +1,23 @@
 {
-  "name": "m38-agent-orchestrator",
+  "name": "m38-agent",
   "version": "1.0.0",
   "description": "Multi-Agent AI Orchestrator and Smart Model Router for OpenAI-compatible APIs",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "bin": {
-    "m38": "dist/cli.js"
+    "m38": "./dist/cli.js"
   },
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "tsc",
     "dev": "tsx src/cli.ts",
     "start": "node dist/cli.js",
     "typecheck": "tsc --noEmit",
-    "clean": "rm -rf dist"
+    "clean": "rm -rf dist",
+    "prepublishOnly": "npm run build"
   },
   "engines": {
     "node": ">=20.0.0"
