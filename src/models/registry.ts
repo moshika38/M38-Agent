@@ -34,15 +34,15 @@ const FALLBACK_CONFIG: ModelsConfig = {
       models: [
         { id: "gemini-3.5-flash", priority: 10, contextWindow: 1048576 },
         { id: "gemini-3-flash-preview", priority: 9, contextWindow: 1048576 },
-        { id: "gemini-2.5-flash", priority: 8, contextWindow: 1048576 },
-        { id: "llama-4-maverick", priority: 7, contextWindow: 524288 },
+        { id: "llama-4-scout", priority: 8, contextWindow: 524288 },
+        { id: "gemini-2.5-flash", priority: 7, contextWindow: 1048576 },
       ],
     },
     coding: {
       label: "Primary Coding",
       models: [
-        { id: "qwen3-coder-480b", priority: 10, contextWindow: 262144 },
-        { id: "qwen3-coder-next", priority: 9, contextWindow: 262144 },
+        { id: "qwen3-coder-next", priority: 10, contextWindow: 262144 },
+        { id: "qwen3-coder-480b", priority: 9, contextWindow: 262144 },
         { id: "devstral-2-123b", priority: 8, contextWindow: 131072 },
         { id: "codestral", priority: 7, contextWindow: 131072 },
       ],
@@ -50,27 +50,19 @@ const FALLBACK_CONFIG: ModelsConfig = {
     fast: {
       label: "Fast / Lightweight",
       models: [
-        { id: "gemini-3.1-flash-lite-preview", priority: 10, contextWindow: 1048576 },
-        { id: "glm-4.7-flash", priority: 9, contextWindow: 131072 },
-        { id: "gpt-oss-20b", priority: 8, contextWindow: 131072 },
-        { id: "llama-3.1-8b-instant", priority: 7, contextWindow: 131072 },
-      ],
-    },
-    planner: {
-      label: "Task Planning & Decomposition",
-      models: [
         { id: "gpt-oss-120b", priority: 10, contextWindow: 131072 },
         { id: "glm-4.7-flash", priority: 9, contextWindow: 131072 },
         { id: "qwen3-30b-a3b-fp8", priority: 8, contextWindow: 131072 },
+        { id: "mistral-medium-3.5", priority: 7, contextWindow: 131072 },
       ],
     },
     reasoning: {
       label: "Deep Reasoning / Architecture",
       models: [
         { id: "cogito-2.1-671b", priority: 10, contextWindow: 131072 },
-        { id: "gpt-oss-120b", priority: 9, contextWindow: 131072 },
-        { id: "deepseek-v4-pro", priority: 8, contextWindow: 131072 },
-        { id: "nemotron-3-super-120b", priority: 7, contextWindow: 131072 },
+        { id: "deepseek-v4-pro", priority: 9, contextWindow: 131072 },
+        { id: "minimax-m2.7", priority: 8, contextWindow: 131072 },
+        { id: "kimi-k2.6", priority: 7, contextWindow: 131072 },
       ],
     },
   },

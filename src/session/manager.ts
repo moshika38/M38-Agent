@@ -1,115 +1,150 @@
-import { mkdirSync, readFileSync, writeFileSync, readdirSync, unlinkSync, existsSync } from "node:fs";
-import { join } from "node:path";
-import type { Session, SessionMessage } from "./types.js";
+import fs from 'node:fs';
+import path from 'node:path';
+
+
+export interface Message {
+  role: 'user' | 'assistant' | 'system';
+  content: string;
+  timestamp: number;
+}
+
+
+export interface Session {
+  id: string;
+  title: string;
+  createdAt: number;
+  updatedAt: number;
+  messages: Message[];
+}
+
 
 export class SessionManager {
-  private dir: string;
+  private sessionsDir: string;
+  private currentSession: Session;
 
-  constructor(sessionDir?: string) {
-    this.dir = sessionDir ?? join(process.cwd(), "workspace", "sessions");
-    mkdirSync(this.dir, { recursive: true });
+
+  constructor() {
+    this.sessionsDir = path.join(process.cwd(), '.m38', 'sessions');
+    if (!fs.existsSync(this.sessionsDir)) {
+      fs.mkdirSync(this.sessionsDir, { recursive: true });
+    }
+
+    const all = this.getAllSessions();
+    if (all.length > 0) {
+      this.currentSession = all[0]!;
+    } else {
+      this.currentSession = this.createNewSession('Session 1');
+    }
   }
 
-  create(title?: string): Session {
-    const id = `sess_${Date.now()}`;
-    const now = new Date().toISOString();
+
+  public getAllSessions(): Session[] {
+    try {
+      if (!fs.existsSync(this.sessionsDir)) return [];
+      const files = fs.readdirSync(this.sessionsDir).filter(f => f.endsWith('.json'));
+      const sessions: Session[] = [];
+
+      for (const file of files) {
+        try {
+          const raw = fs.readFileSync(path.join(this.sessionsDir, file), 'utf-8');
+          const parsed = JSON.parse(raw);
+          if (parsed && parsed.id) {
+            sessions.push(parsed);
+          }
+        } catch {
+          // ignore corrupted files
+        }
+      }
+
+      return sessions.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+    } catch {
+      return [];
+    }
+  }
+
+
+  public getCurrentSession(): Session {
+    return this.currentSession;
+  }
+
+
+  public createNewSession(title?: string): Session {
+    const id = `session_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
     const session: Session = {
       id,
-      title: title ?? "New Session",
-      createdAt: now,
-      updatedAt: now,
-      messages: [],
+      title: title || 'New Session',
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      messages: []
     };
-    this.save(session);
+
+    this.currentSession = session;
+    this.persist(session);
     return session;
   }
 
-  save(session: Session): void {
-    session.updatedAt = new Date().toISOString();
-    const filePath = join(this.dir, `${session.id}.json`);
-    writeFileSync(filePath, JSON.stringify(session, null, 2), "utf-8");
-  }
 
-  load(id: string): Session | null {
-    const filePath = join(this.dir, `${id}.json`);
-    if (!existsSync(filePath)) return null;
-    try {
-      const raw = readFileSync(filePath, "utf-8");
-      return JSON.parse(raw) as Session;
-    } catch {
-      return null;
-    }
-  }
-
-  list(): Session[] {
-    if (!existsSync(this.dir)) return [];
-    const files = readdirSync(this.dir).filter((f) => f.endsWith(".json"));
-    const sessions: Session[] = [];
-    for (const file of files) {
+  public setActiveSession(id: string): boolean {
+    const filePath = path.join(this.sessionsDir, `${id}.json`);
+    if (fs.existsSync(filePath)) {
       try {
-        const raw = readFileSync(join(this.dir, file), "utf-8");
-        const parsed = JSON.parse(raw) as Session;
-        if (parsed.messages.length > 0) {
-          sessions.push(parsed);
-        }
+        const raw = fs.readFileSync(filePath, 'utf-8');
+        this.currentSession = JSON.parse(raw);
+        return true;
       } catch {
-        // skip corrupt files
+        return false;
       }
     }
-    return sessions.sort(
-      (a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime(),
-    );
+    return false;
   }
 
-  delete(id: string): boolean {
-    const filePath = join(this.dir, `${id}.json`);
-    if (!existsSync(filePath)) return false;
-    unlinkSync(filePath);
-    return true;
-  }
 
-  discardIfEmpty(session: Session): void {
-    if (session.messages.length === 0) {
-      this.delete(session.id);
+  public deleteSession(id: string): void {
+    const filePath = path.join(this.sessionsDir, `${id}.json`);
+    if (fs.existsSync(filePath)) {
+      fs.unlinkSync(filePath);
+    }
+    const remaining = this.getAllSessions();
+    if (remaining.length > 0) {
+      this.currentSession = remaining[0]!;
+    } else {
+      this.createNewSession('Session 1');
     }
   }
 
-  addMessage(session: Session, message: SessionMessage): void {
-    session.messages.push(message);
-    session.updatedAt = new Date().toISOString();
-    this.save(session);
-  }
 
-  updateTitle(session: Session, title: string): void {
-    session.title = title;
-    session.updatedAt = new Date().toISOString();
-    this.save(session);
-  }
-
-  static generateTitle(firstUserMessage: string): string {
-    const words = firstUserMessage.replace(/\s+/g, " ").trim().split(" ");
-    const slice = words.slice(0, 6).join(" ");
-    if (slice.length <= 50) return slice;
-    return slice.slice(0, 47) + "...";
-  }
-
-  private activeSession: Session | null = null;
-
-  getActiveSession(): Session | null {
-    return this.activeSession;
-  }
-
-  createNewSession(): Session {
-    if (this.activeSession) {
-      this.discardIfEmpty(this.activeSession);
+  public addMessage(role: 'user' | 'assistant' | 'system', content: string): void {
+    if (!this.currentSession) {
+      this.createNewSession();
     }
-    this.activeSession = this.create();
-    return this.activeSession;
+
+    if (role === 'user' && this.currentSession.messages.length === 0) {
+      this.currentSession.title = content.trim().slice(0, 30) || 'Chat Session';
+    }
+
+    this.currentSession.messages.push({
+      role,
+      content,
+      timestamp: Date.now()
+    });
+
+    this.currentSession.updatedAt = Date.now();
+    this.persist(this.currentSession);
   }
 
-  setActiveSession(session: Session): void {
-    this.activeSession = session;
+
+  private persist(session: Session): void {
+    try {
+      if (!fs.existsSync(this.sessionsDir)) {
+        fs.mkdirSync(this.sessionsDir, { recursive: true });
+      }
+      const filePath = path.join(this.sessionsDir, `${session.id}.json`);
+      fs.writeFileSync(filePath, JSON.stringify(session, null, 2), 'utf-8');
+    } catch (err) {
+      console.error('Failed to save session to disk:', err);
+    }
   }
 }
+
 
 export const sessionManager = new SessionManager();

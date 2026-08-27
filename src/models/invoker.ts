@@ -27,12 +27,10 @@ function sleep(ms: number): Promise<void> {
 }
 
 const UNIVERSAL_FALLBACKS = [
-  "auto",
+  "glm-4.7-flash",
   "qwen3-30b-a3b-fp8",
-  "llama-3.3-70b-fp8-fast",
-  "mistral-small-4",
   "gpt-oss-120b",
-  "deepseek-v4-pro",
+  "mistral-medium-3.5",
 ];
 
 export class ModelInvoker {

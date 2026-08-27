@@ -6,6 +6,7 @@ import { ModelInvoker, type InvokeOptions } from "../models/invoker.js";
 import { TaskRouter } from "./router.js";
 import { type ExecutionPlan, type OrchestratorResult, type FusionResult, type PipelineStage } from "../models/types.js";
 import { MODEL_POOLS, POOL_LABELS, type PoolName } from "../config/models.js";
+import { sessionManager } from "../session/manager.js";
 
 export const M38_SYSTEM_PROMPT = `You are M38 Agent, an autonomous Multi-Agent AI Orchestrator and Smart Model Router.
 You are powered by a multi-model engine routing dynamically across Vision, Coding, Deep Reasoning, and Fast Execution tiers.
@@ -84,21 +85,30 @@ export class Orchestrator {
       process.stdout.write(badge + '\n');
     }
 
+    // ── Record user message to session ──────────────────────
+    sessionManager.addMessage('user', userPrompt);
+
     // ── Pipeline execution ───────────────────────────────────
     if (plan.pipeline && plan.pipeline.length > 0) {
-      return this.executePipeline(fullPrompt, plan, { ...opts, images: allImages });
+      const result = await this.executePipeline(fullPrompt, plan, { ...opts, images: allImages });
+      sessionManager.addMessage('assistant', result.response);
+      return result;
     }
 
     // ── Fusion execution ─────────────────────────────────────
     if (plan.task_type === "complex_reasoning" && plan.complexity === "high") {
       const fusionConfig = this.registry.getConfig().specialModes.fusion;
       if (fusionConfig?.pools) {
-        return this.executeFusion(fullPrompt, plan, fusionConfig.pools, { ...opts, images: allImages });
+        const result = await this.executeFusion(fullPrompt, plan, fusionConfig.pools, { ...opts, images: allImages });
+        sessionManager.addMessage('assistant', result.response);
+        return result;
       }
     }
 
     // ── Single model execution (default) ─────────────────────
-    return this.executeSingle(fullPrompt, plan, { ...opts, images: allImages });
+    const result = await this.executeSingle(fullPrompt, plan, { ...opts, images: allImages });
+    sessionManager.addMessage('assistant', result.response);
+    return result;
   }
 
   /* ------------------------------------------------------------------ */
