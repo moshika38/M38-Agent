@@ -1,24 +1,27 @@
 import type { ChatCompletionMessageParam } from "openai/resources/chat/completions";
 import { ModelInvoker } from "../models/invoker.js";
 import { ExecutionPlanSchema, type ExecutionPlan } from "../models/types.js";
-import { logInfo, logWarning, timer } from "../utils/logger.js";
 
-const ROUTER_SYSTEM_PROMPT = `You are an execution plan analyzer. Given a user prompt, output a JSON execution plan.
+const ROUTER_SYSTEM_PROMPT = `You are a task classifier. Given a user prompt, output EXACTLY a single raw JSON object — no markdown, no code fences, no explanation, no extra text before or after.
 
-Rules:
-- "direct_fast": Simple questions, quick lookups, short factual answers, simple translations
-- "deep_coding": Code generation, debugging, refactoring, architecture design, file modifications
+Schema:
+{"task_type":"direct_fast|deep_coding|image_to_code|complex_reasoning","needs_vision":bool,"needs_coding":bool,"needs_deep_reasoning":bool,"complexity":"low|medium|high","framework":"react|flutter|general_code|none","summary":"string"}
+
+Rules for task_type:
+- "direct_fast": Simple questions, quick lookups, factual answers, translations
+- "deep_coding": Code generation, debugging, refactoring, architecture
 - "image_to_code": User provides an image and wants code/UI built from it
-- "complex_reasoning": Multi-step reasoning, planning, analysis, comparisons, math
+- "complex_reasoning": Multi-step reasoning, planning, analysis, comparisons
 
-Set needs_vision=true if the user is asking about or providing images.
-Set needs_coding=true if the task involves writing, reviewing, or modifying code.
-Set needs_deep_reasoning=true if the task requires multi-step logical analysis.
-Set complexity to "low" for trivial tasks, "medium" for standard tasks, "high" for complex multi-part tasks.
-Set framework if the user mentions a specific tech (react, flutter) or "general_code" for code without a framework, or "none" for non-code tasks.
-Provide a brief 1-sentence summary of what you'll do.
+Rules for fields:
+- needs_vision=true if the user is asking about or providing images
+- needs_coding=true if the task involves writing, reviewing, or modifying code
+- needs_deep_reasoning=true if the task requires multi-step logical analysis
+- complexity: "low" for trivial, "medium" for standard, "high" for complex multi-part
+- framework: pick the named tech if mentioned, "general_code" for generic code, "none" for non-code
+- summary: one short sentence describing what will be done
 
-Output ONLY valid JSON matching the schema.`;
+Output ONLY the raw JSON object. Nothing else.`;
 
 export class TaskRouter {
   private invoker: ModelInvoker;
@@ -28,8 +31,26 @@ export class TaskRouter {
   }
 
   async analyze(userPrompt: string, hasImages: boolean = false): Promise<ExecutionPlan> {
-    const t = timer();
-    logInfo("Analyzing task intent...");
+    // Fast-path: skip LLM routing call for short, obvious prompts
+    if (!hasImages && userPrompt.length < 80) {
+      const lower = userPrompt.toLowerCase().trim();
+      const hasCode =
+        /```/.test(userPrompt) ||
+        /\b(function|class|const |import |def |fn |pub |flutter|react|bug|error|fix|implement|refactor|debug)\b/.test(userPrompt);
+      if (!hasCode) {
+        const isGreeting = /^(hi|hello|hey|yo|sup|thanks|thank you|bye|quit|ok|yes|no)\s*[!.?]*$/i.test(lower);
+        if (isGreeting || userPrompt.trim().split(/\s+/).length <= 12) {
+          return {
+            task_type: "direct_fast",
+            needs_vision: false,
+            needs_coding: false,
+            needs_deep_reasoning: false,
+            complexity: "low",
+            summary: "Simple direct request",
+          };
+        }
+      }
+    }
 
     const messages: ChatCompletionMessageParam[] = [
       { role: "system", content: ROUTER_SYSTEM_PROMPT },
@@ -50,16 +71,13 @@ export class TaskRouter {
 
     let plan: ExecutionPlan;
     try {
-      const parsed = JSON.parse(result.content);
+      const cleanJson = result.content.replace(/```json\n?|```/g, "").trim();
+      const parsed = JSON.parse(cleanJson);
       plan = ExecutionPlanSchema.parse(parsed);
     } catch {
-      logWarning(`Router JSON parse failed, using fallback plan (model: ${result.modelUsed})`);
       plan = this.fallbackPlan(userPrompt, hasImages);
     }
 
-    logInfo(
-      `Task classified as ${plan.task_type} (complexity: ${plan.complexity}) in ${t.stop()} via ${result.modelUsed}`
-    );
     return plan;
   }
 

@@ -15,7 +15,6 @@ export const COLORS = {
 export const BADGES = {
   online: () => chalk.green("● ONLINE"),
   retry: () => chalk.yellow("▲ RETRY"),
-  route: () => chalk.hex("#F5A623")("◆ M38 ROUTE"),
   offline: () => chalk.red("● OFFLINE"),
 } as const;
 
@@ -31,23 +30,17 @@ ${COLORS.primary("██║ ╚═╝ ██║██████╔╝╚██
 ${COLORS.primary("╚═╝     ╚═╝╚═════╝  ╚════╝")}  ${COLORS.muted("─────────────────────────────")}
 `;
 
-export function renderRouterLine(taskLabel: string, model: string, pool: string): string {
-  const tag = chalk.hex("#F5A623")("◆ M38 Router") + COLORS.muted(`: ${taskLabel}`);
-  const modelTag = COLORS.muted("→ [") + COLORS.white(model) + COLORS.muted("] via ") + renderPoolBadge(pool);
-  return `  ${tag} ${modelTag}`;
-}
-
-export function renderStreamingBadge(): string {
-  return `  ${COLORS.cyan("◆")} ${COLORS.white("Streaming...")}`;
-}
-
-export function renderDoneBadge(model: string, pool: string, ms: number, attempts: number): string {
+export function renderRoutingBadge(taskLabel: string, model: string, _pool: string, ms: number): string {
   const time = ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(2)}s`;
-  return `  ${COLORS.green("✔")} ${COLORS.muted(`Done in ${time}`)} ${COLORS.muted("via")} ${COLORS.white(model)} ${COLORS.muted("via")} ${renderPoolBadge(pool)} ${COLORS.muted(`(${attempts} attempt${attempts > 1 ? "s" : ""})`)}`;
+  return `  ${COLORS.muted("[")}${COLORS.primary("◆ M38")}${COLORS.muted("]")} ${COLORS.white(taskLabel)} ${COLORS.muted("➔")} ${COLORS.white(model)} ${COLORS.muted(`(${time})`)}`;
+}
+
+export function renderDivider(): string {
+  return COLORS.muted("  " + "─".repeat(56));
 }
 
 export function renderErrorBadge(msg: string): string {
-  return `  ${COLORS.red("✖ Error:")} ${msg}`;
+  return `  ${COLORS.red("✖")} ${msg}`;
 }
 
 export function renderPoolBadge(pool: string): string {
@@ -71,8 +64,16 @@ export function renderTaskTypeLabel(taskType: string): string {
   return map[taskType] ?? taskType;
 }
 
+export function enterAlternateBuffer(): void {
+  process.stdout.write("\x1b[?1049h\x1b[H\x1b[2J");
+}
+
+export function leaveAlternateBuffer(): void {
+  process.stdout.write("\x1b[?1049l");
+}
+
 export function clearScreen(): void {
-  process.stdout.write("\x1B[2J\x1B[0f");
+  process.stdout.write("\x1b[2J\x1b[H");
 }
 
 export function renderPrompt(): void {

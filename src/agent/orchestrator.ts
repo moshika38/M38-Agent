@@ -3,13 +3,20 @@ import { ModelRegistry } from "../models/registry.js";
 import { ModelInvoker, type InvokeOptions } from "../models/invoker.js";
 import { TaskRouter } from "./router.js";
 import { type ExecutionPlan, type OrchestratorResult, type FusionResult } from "../models/types.js";
-import { logStep } from "../utils/logger.js";
+
+export const M38_SYSTEM_PROMPT = `You are M38 Agent, an autonomous Multi-Agent AI Orchestrator and Smart Model Router.
+You are powered by a multi-model engine routing dynamically across Vision, Coding, Deep Reasoning, and Fast Execution tiers.
+
+Guidelines:
+- Your identity is strictly "M38 Agent". Never identify yourself as a generic model trained solely by Google, OpenAI, DeepSeek, or Anthropic.
+- If asked "Who are you?", state that you are M38 Agent, an AI Orchestrator built to route tasks intelligently across specialized AI models.
+- Maintain an expert, concise, technical, and helpful developer tone.
+- When generating code or analyzing architectures, deliver production-ready, clean, and bug-free output.`;
 
 export interface OrchestratorConfig {
   baseURL: string;
   apiKey: string;
   configPath?: string;
-  enableStreaming?: boolean;
   quiet?: boolean;
 }
 
@@ -39,6 +46,8 @@ export class Orchestrator {
       onStreamChunk?: (chunk: string) => void;
       forceModel?: string;
       forcePool?: string;
+      signal?: AbortSignal;
+      onRouting?: (model: string, pool: string, ms: number) => void;
     } = {}
   ): Promise<OrchestratorResult> {
     const hasImages = Boolean(opts.images?.length);
@@ -46,20 +55,6 @@ export class Orchestrator {
     const plan = opts.forceModel || opts.forcePool
       ? this.buildForcedPlan(opts.forceModel, opts.forcePool, hasImages)
       : await this.router.analyze(userPrompt, hasImages);
-
-    if (!this.quiet) {
-      console.log(
-        "\n┌─── Execution Plan ───┐" +
-        `\n│  Type:       ${plan.task_type}` +
-        `\n│  Complexity: ${plan.complexity}` +
-        `\n│  Vision:     ${plan.needs_vision ? "✔" : "✘"}` +
-        `\n│  Coding:     ${plan.needs_coding ? "✔" : "✘"}` +
-        `\n│  Reasoning:  ${plan.needs_deep_reasoning ? "✔" : "✘"}` +
-        (plan.framework && plan.framework !== "none" ? `\n│  Framework:  ${plan.framework}` : "") +
-        `\n│  Summary:    ${plan.summary}` +
-        `\n└───────────────────────┘\n`
-      );
-    }
 
     if (plan.task_type === "complex_reasoning" && plan.complexity === "high") {
       const fusionConfig = this.registry.getConfig().specialModes.fusion;
@@ -78,21 +73,20 @@ export class Orchestrator {
       conversationHistory?: ChatCompletionMessageParam[];
       systemPrompt?: string;
       onStreamChunk?: (chunk: string) => void;
+      signal?: AbortSignal;
+      onRouting?: (model: string, pool: string, ms: number) => void;
     }
   ): Promise<OrchestratorResult> {
     const pool = this.selectPool(plan);
     const systemPrompt = this.buildSystemPrompt(plan, opts.systemPrompt);
     const messages = this.buildMessages(systemPrompt, userPrompt, opts.conversationHistory);
 
-    if (!this.quiet) {
-      logStep(1, 1, `Routing to pool: ${pool}`);
-    }
-
     const invokeOpts: InvokeOptions = {
       messages,
       preferredPool: pool,
       temperature: plan.complexity === "low" ? 0.3 : 0.7,
       jsonMode: false,
+      signal: opts.signal,
     };
 
     let result;
@@ -100,6 +94,10 @@ export class Orchestrator {
       result = await this.invoker.invokeStreaming(invokeOpts, opts.onStreamChunk);
     } else {
       result = await this.invoker.invoke(invokeOpts);
+    }
+
+    if (opts.onRouting && !this.quiet) {
+      opts.onRouting(result.modelUsed, result.poolUsed, result.totalMs);
     }
 
     return {
@@ -119,20 +117,20 @@ export class Orchestrator {
     opts: {
       conversationHistory?: ChatCompletionMessageParam[];
       systemPrompt?: string;
+      signal?: AbortSignal;
+      onRouting?: (model: string, pool: string, ms: number) => void;
     }
   ): Promise<OrchestratorResult> {
     const systemPrompt = this.buildSystemPrompt(plan, opts.systemPrompt);
     const messages = this.buildMessages(systemPrompt, userPrompt, opts.conversationHistory);
 
-    const promises = fusionPools.map(async (pool, idx) => {
-      if (!this.quiet) {
-        logStep(idx + 1, fusionPools.length, `Dispatching to pool: ${pool}`);
-      }
+    const promises = fusionPools.map(async (pool) => {
       try {
         return await this.invoker.invoke({
           messages,
           preferredPool: pool,
           temperature: 0.7,
+          signal: opts.signal,
         });
       } catch {
         return null;
@@ -183,43 +181,47 @@ export class Orchestrator {
   }
 
   private buildSystemPrompt(plan: ExecutionPlan, custom?: string): string {
-    if (custom) return custom;
-
-    const parts: string[] = [];
+    const taskParts: string[] = [];
 
     switch (plan.task_type) {
       case "direct_fast":
-        parts.push("You are a helpful, concise assistant. Give direct, accurate answers.");
+        taskParts.push("Give direct, accurate answers.");
         break;
       case "deep_coding":
-        parts.push(
-          "You are an expert software engineer. Write clean, production-ready code.",
+        taskParts.push(
+          "Write clean, production-ready code.",
           "Follow best practices. Use proper error handling.",
-          "When writing code, output complete files with proper imports.",
+          "Output complete files with proper imports.",
         );
         if (plan.framework && plan.framework !== "none" && plan.framework !== "general_code") {
-          parts.push(`Specialize in ${plan.framework} development.`);
+          taskParts.push(`Specialize in ${plan.framework} development.`);
         }
         break;
       case "image_to_code":
-        parts.push(
-          "You are an expert at analyzing images and generating code from visual designs.",
-          "Describe what you see, then provide the implementation code.",
+        taskParts.push(
+          "Analyze the provided image and generate matching code.",
+          "Describe what you see, then provide the full implementation.",
         );
         break;
       case "complex_reasoning":
-        parts.push(
-          "You are a deep analytical thinker. Break down complex problems step by step.",
+        taskParts.push(
+          "Break down complex problems step by step.",
           "Consider multiple perspectives. Provide thorough, well-structured analysis.",
         );
         break;
     }
 
     if (plan.complexity === "high") {
-      parts.push("This is a complex task. Take your time and be thorough.");
+      taskParts.push("This is a complex task. Take your time and be thorough.");
     }
 
-    return parts.join("\n");
+    if (custom) {
+      return M38_SYSTEM_PROMPT + "\n\n" + custom;
+    }
+
+    return taskParts.length > 0
+      ? M38_SYSTEM_PROMPT + "\n\n" + taskParts.join("\n")
+      : M38_SYSTEM_PROMPT;
   }
 
   private buildMessages(

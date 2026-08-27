@@ -21,6 +21,19 @@ export interface InvokeResult {
   totalMs: number;
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+const UNIVERSAL_FALLBACKS = [
+  "auto",
+  "qwen3-30b-a3b-fp8",
+  "llama-3.3-70b-fp8-fast",
+  "mistral-small-4",
+  "gpt-oss-120b",
+  "deepseek-v4-pro",
+];
+
 export class ModelInvoker {
   private client: OpenAI;
   private registry: ModelRegistry;
@@ -33,11 +46,16 @@ export class ModelInvoker {
   async invoke(opts: InvokeOptions): Promise<InvokeResult> {
     const modelOrder = this.buildModelOrder(opts);
     const t = timer();
-    let attempts = 0;
+    const attempted = new Set<string>();
     const errors: string[] = [];
+    let attempts = 0;
+    let rateLimitCount = 0;
 
     for (const { pool, modelId } of modelOrder) {
+      if (attempted.has(modelId)) continue;
+      attempted.add(modelId);
       attempts++;
+
       try {
         const params: OpenAI.ChatCompletionCreateParamsNonStreaming = {
           model: modelId,
@@ -56,9 +74,8 @@ export class ModelInvoker {
         if (!content || content.trim().length === 0) {
           const reason = "empty response";
           errors.push(`${modelId}: ${reason}`);
-          if (modelOrder.indexOf(modelOrder[attempts - 1]) < modelOrder.length - 1) {
-            logModelSwitch(modelId, modelOrder[attempts]?.modelId ?? "N/A", reason);
-          }
+          const nextModel = modelOrder.find((m) => !attempted.has(m.modelId))?.modelId;
+          if (nextModel) logModelSwitch(modelId, nextModel, reason);
           continue;
         }
 
@@ -70,12 +87,18 @@ export class ModelInvoker {
           totalMs: t.elapsed(),
         };
       } catch (err: unknown) {
+        if (this.isAbortError(err)) throw err;
         const reason = this.classifyError(err);
         errors.push(`${modelId}: ${reason}`);
 
-        const nextModel = modelOrder[attempts]?.modelId;
-        if (nextModel) {
-          logModelSwitch(modelId, nextModel, reason);
+        const nextModel = modelOrder.find((m) => !attempted.has(m.modelId))?.modelId;
+        if (nextModel) logModelSwitch(modelId, nextModel, reason);
+
+        // exponential backoff on rate limit (429)
+        if (reason.includes("429")) {
+          rateLimitCount++;
+          const jitter = Math.min(400 * rateLimitCount, 3000) + Math.random() * 200;
+          await sleep(jitter);
         }
       }
     }
@@ -92,11 +115,16 @@ export class ModelInvoker {
   ): Promise<InvokeResult> {
     const modelOrder = this.buildModelOrder(opts);
     const t = timer();
-    let attempts = 0;
+    const attempted = new Set<string>();
     const errors: string[] = [];
+    let attempts = 0;
+    let rateLimitCount = 0;
 
     for (const { pool, modelId } of modelOrder) {
+      if (attempted.has(modelId)) continue;
+      attempted.add(modelId);
       attempts++;
+
       try {
         const params: OpenAI.ChatCompletionCreateParamsStreaming = {
           model: modelId,
@@ -112,6 +140,7 @@ export class ModelInvoker {
 
         let fullContent = "";
         for await (const chunk of stream) {
+          if (opts.signal?.aborted) break;
           const delta = chunk.choices?.[0]?.delta?.content;
           if (delta) {
             fullContent += delta;
@@ -122,7 +151,7 @@ export class ModelInvoker {
         if (!fullContent.trim()) {
           const reason = "empty stream response";
           errors.push(`${modelId}: ${reason}`);
-          const nextModel = modelOrder[attempts]?.modelId;
+          const nextModel = modelOrder.find((m) => !attempted.has(m.modelId))?.modelId;
           if (nextModel) logModelSwitch(modelId, nextModel, reason);
           continue;
         }
@@ -135,10 +164,18 @@ export class ModelInvoker {
           totalMs: t.elapsed(),
         };
       } catch (err: unknown) {
+        if (this.isAbortError(err)) throw err;
         const reason = this.classifyError(err);
         errors.push(`${modelId}: ${reason}`);
-        const nextModel = modelOrder[attempts]?.modelId;
+        const nextModel = modelOrder.find((m) => !attempted.has(m.modelId))?.modelId;
         if (nextModel) logModelSwitch(modelId, nextModel, reason);
+
+        // exponential backoff on rate limit (429)
+        if (reason.includes("429")) {
+          rateLimitCount++;
+          const jitter = Math.min(400 * rateLimitCount, 3000) + Math.random() * 200;
+          await sleep(jitter);
+        }
       }
     }
 
@@ -149,36 +186,65 @@ export class ModelInvoker {
   }
 
   private buildModelOrder(opts: InvokeOptions): Array<{ pool: string; modelId: string }> {
+    const seen = new Set<string>();
+    const result: Array<{ pool: string; modelId: string }> = [];
+
+    const addUnique = (pool: string, modelId: string) => {
+      if (!seen.has(modelId)) {
+        seen.add(modelId);
+        result.push({ pool, modelId });
+      }
+    };
+
     if (opts.preferredModel) {
       const found = this.registry.findModelById(opts.preferredModel);
       if (found) {
-        const rest = this.registry.getModelsSorted(found.pool)
-          .filter((m) => m.id !== opts.preferredModel)
-          .map((m) => ({ pool: found.pool, modelId: m.id }));
-        return [{ pool: found.pool, modelId: opts.preferredModel }, ...rest];
+        addUnique(found.pool, opts.preferredModel);
+        for (const m of this.registry.getModelsSorted(found.pool)) {
+          if (m.id !== opts.preferredModel) addUnique(found.pool, m.id);
+        }
       }
     }
 
     if (opts.preferredPool) {
       const models = this.registry.getModelsSorted(opts.preferredPool);
-      if (models.length > 0) {
-        return models.map((m) => ({ pool: opts.preferredPool!, modelId: m.id }));
+      for (const m of models) {
+        addUnique(opts.preferredPool, m.id);
       }
-    }
 
-    const allModels: Array<{ pool: string; modelId: string }> = [];
-    for (const poolName of this.registry.getPools()) {
-      for (const m of this.registry.getModelsSorted(poolName)) {
-        if (!allModels.some((x) => x.modelId === m.id)) {
-          allModels.push({ pool: poolName, modelId: m.id });
+      // Cross-pool fallback: if preferred pool is small, append top models from other pools
+      if (models.length < 8) {
+        for (const poolName of this.registry.getPools()) {
+          if (poolName === opts.preferredPool) continue;
+          for (const m of this.registry.getModelsSorted(poolName)) {
+            addUnique(poolName, m.id);
+          }
+        }
+      }
+    } else {
+      for (const poolName of this.registry.getPools()) {
+        for (const m of this.registry.getModelsSorted(poolName)) {
+          addUnique(poolName, m.id);
         }
       }
     }
-    return allModels.sort((a, b) => {
-      const ea = this.registry.findModelById(a.modelId)?.entry;
-      const eb = this.registry.findModelById(b.modelId)?.entry;
-      return (eb?.priority ?? 0) - (ea?.priority ?? 0);
-    });
+
+    // Universal fallbacks: models not already in the registry-based chain
+    for (const modelId of UNIVERSAL_FALLBACKS) {
+      if (!seen.has(modelId)) {
+        addUnique("fast", modelId);
+      }
+    }
+
+    return result;
+  }
+
+  private isAbortError(err: unknown): boolean {
+    if (err instanceof DOMException) return err.name === "AbortError";
+    if (err instanceof Error) {
+      return err.name === "AbortError" || err.message.toLowerCase().includes("aborted");
+    }
+    return false;
   }
 
   private classifyError(err: unknown): string {
