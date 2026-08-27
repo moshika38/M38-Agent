@@ -4,6 +4,7 @@ import chalk from 'chalk';
 import { Orchestrator } from './agent/orchestrator.js';
 import { M38_BANNER } from './utils/banner.js';
 import { sessionManager } from './session/manager.js';
+import { MODEL_POOLS } from './config/models.js';
 
 
 const orchestrator = new Orchestrator({
@@ -15,7 +16,7 @@ const orchestrator = new Orchestrator({
 const COMMANDS = [
   { cmd: '/exit', desc: 'Quit M38 Agent Orchestrator' },
   { cmd: '/clear', desc: 'Clear terminal screen and history' },
-  { cmd: '/pools', desc: 'Inspect available model registry' },
+  { cmd: '/pools', desc: 'Inspect active model pools' },
   { cmd: '/new', desc: 'Start a fresh conversation session' },
   { cmd: '/sessions', desc: 'Browse and switch saved sessions' },
   { cmd: '/help', desc: 'View available commands guide' }
@@ -23,114 +24,118 @@ const COMMANDS = [
 
 
 let inputBuffer = '';
-let selectedSuggestionIndex = 0;
-let lastRenderedSuggestionCount = 0;
+let selectedIdx = 0;
+let lastPopupLineCount = 0;
 let isExecuting = false;
 let currentAbortController: AbortController | null = null;
 let escTimer: NodeJS.Timeout | null = null;
 
 
-const PROMPT_PREFIX = chalk.hex('#F5A623')('Ask anything > ');
-const PROMPT_PREFIX_RAW = 'Ask anything > ';
+const PROMPT_LABEL = chalk.hex('#F5A623')('Ask anything > ');
+const PROMPT_RAW = 'Ask anything > ';
 
 
 function resetScreen() {
   process.stdout.write('\x1b[2J\x1b[3J\x1b[H');
   console.log(M38_BANNER);
-  console.log(chalk.gray('  Type / for command suggestions. Type /exit to quit.\n'));
+  console.log(chalk.gray('  Type / for commands, @ for files. Type /exit to quit.\n'));
 }
 
 
-function getFilteredCommands() {
+function getMatches() {
   if (!inputBuffer.startsWith('/')) return [];
-  const query = inputBuffer.toLowerCase();
-  return COMMANDS.filter(c => c.cmd.toLowerCase().startsWith(query));
+  const q = inputBuffer.toLowerCase();
+  return COMMANDS.filter(c => c.cmd.toLowerCase().startsWith(q));
 }
 
 
-function clearSuggestions() {
-  if (lastRenderedSuggestionCount > 0) {
-    for (let i = 0; i < lastRenderedSuggestionCount; i++) {
+function erasePopupLines() {
+  if (lastPopupLineCount > 0) {
+    for (let i = 0; i < lastPopupLineCount; i++) {
       readline.moveCursor(process.stdout, 0, 1);
       readline.clearLine(process.stdout, 0);
     }
-    readline.moveCursor(process.stdout, 0, -lastRenderedSuggestionCount);
-    lastRenderedSuggestionCount = 0;
+    readline.moveCursor(process.stdout, 0, -lastPopupLineCount);
+    lastPopupLineCount = 0;
   }
 }
 
 
-function renderUI() {
+function renderInput() {
   readline.clearLine(process.stdout, 0);
   readline.cursorTo(process.stdout, 0);
+  process.stdout.write(PROMPT_LABEL + inputBuffer);
 
-  process.stdout.write(PROMPT_PREFIX + inputBuffer);
 
-  clearSuggestions();
+  erasePopupLines();
 
-  const matches = getFilteredCommands();
+
+  const matches = getMatches();
   if (matches.length > 0) {
-    if (selectedSuggestionIndex >= matches.length) selectedSuggestionIndex = 0;
-    if (selectedSuggestionIndex < 0) selectedSuggestionIndex = matches.length - 1;
+    if (selectedIdx >= matches.length) selectedIdx = 0;
+    if (selectedIdx < 0) selectedIdx = matches.length - 1;
+
 
     process.stdout.write('\n');
     matches.forEach((item, idx) => {
-      const isSelected = idx === selectedSuggestionIndex;
-      const pointer = isSelected ? chalk.hex('#F5A623')('➔ ') : '  ';
-      const cmdText = isSelected ? chalk.hex('#F5A623').bold(item.cmd) : chalk.white(item.cmd);
-      const descText = chalk.gray(` ${item.desc}`);
-      process.stdout.write(pointer + cmdText + descText + '\n');
+      const isSel = idx === selectedIdx;
+      const arrow = isSel ? chalk.hex('#F5A623')('➔ ') : '  ';
+      const cmdStr = isSel ? chalk.hex('#F5A623').bold(item.cmd) : chalk.white(item.cmd);
+      process.stdout.write(`${arrow}${cmdStr} ${chalk.gray(item.desc)}\n`);
     });
 
+
     readline.moveCursor(process.stdout, 0, -(matches.length + 1));
-    readline.cursorTo(process.stdout, PROMPT_PREFIX_RAW.length + inputBuffer.length);
-    lastRenderedSuggestionCount = matches.length;
+    readline.cursorTo(process.stdout, PROMPT_RAW.length + inputBuffer.length);
+    lastPopupLineCount = matches.length;
   } else {
-    readline.cursorTo(process.stdout, PROMPT_PREFIX_RAW.length + inputBuffer.length);
+    readline.cursorTo(process.stdout, PROMPT_RAW.length + inputBuffer.length);
   }
 }
 
 
-async function handleCommand(cmd: string) {
-  clearSuggestions();
+async function runCommandOrQuery(target: string) {
+  erasePopupLines();
   process.stdout.write('\n');
+  const action = target.trim();
 
 
-  if (cmd === '/exit' || cmd === 'exit') {
-    console.log(chalk.gray('Goodbye!'));
+  if (action === '/exit' || action === 'exit' || action === 'quit' || action === ':q') {
+    console.log(chalk.gray('Goodbye!\n'));
     process.exit(0);
   }
 
 
-  if (cmd === '/clear') {
+  if (action === '/clear' || action === 'clear') {
     resetScreen();
     inputBuffer = '';
-    renderUI();
+    renderInput();
     return;
   }
 
 
-  if (cmd === '/new') {
+  if (action === '/new') {
     sessionManager.createNewSession();
-    console.log(chalk.green('✔ Started fresh session.\n'));
+    console.log(chalk.green('✔ Started new session.\n'));
     inputBuffer = '';
-    renderUI();
+    renderInput();
     return;
   }
 
 
-  if (cmd === '/pools') {
+  if (action === '/pools') {
     console.log(chalk.hex('#F5A623')('\n◆ Active Model Pools:'));
-    console.log(chalk.gray('  • Fast:      gemini-3.1-flash-lite-preview, glm-4.7-flash'));
-    console.log(chalk.gray('  • Coding:    qwen3-coder-480b, devstral-2-123b'));
-    console.log(chalk.gray('  • Reasoning: cogito-2.1-671b, gpt-oss-120b\n'));
+    console.log(chalk.gray(`  • Fast:      ${MODEL_POOLS.fast.join(', ')}`));
+    console.log(chalk.gray(`  • Coding:    ${MODEL_POOLS.coding.join(', ')}`));
+    console.log(chalk.gray(`  • Reasoning: ${MODEL_POOLS.reasoning.join(', ')}`));
+    console.log(chalk.gray(`  • Vision:    ${MODEL_POOLS.vision.join(', ')}\n`));
     inputBuffer = '';
-    renderUI();
+    renderInput();
     return;
   }
 
 
-  if (cmd === '/sessions') {
+  if (action === '/sessions') {
     const sessions = sessionManager.list();
     console.log(chalk.hex('#F5A623')('\n◆ Saved Sessions:'));
     if (sessions.length === 0) {
@@ -142,17 +147,17 @@ async function handleCommand(cmd: string) {
       console.log('');
     }
     inputBuffer = '';
-    renderUI();
+    renderInput();
     return;
   }
 
 
-  if (cmd === '/help') {
+  if (action === '/help') {
     console.log(chalk.cyan('\nAvailable Commands:'));
-    COMMANDS.forEach(c => console.log(`  ${c.cmd.padEnd(10)} - ${c.desc}`));
+    COMMANDS.forEach(c => console.log(`  ${c.cmd.padEnd(12)} - ${c.desc}`));
     console.log('');
     inputBuffer = '';
-    renderUI();
+    renderInput();
     return;
   }
 
@@ -163,16 +168,16 @@ async function handleCommand(cmd: string) {
 
   try {
     process.stdout.write(chalk.gray('⠋ thinking...\r'));
-    let firstToken = true;
+    let first = true;
 
 
-    await orchestrator.process(cmd, {
+    await orchestrator.process(action, {
       signal: currentAbortController.signal,
       onStreamChunk: (chunk: string) => {
-        if (firstToken) {
+        if (first) {
           readline.clearLine(process.stdout, 0);
           readline.cursorTo(process.stdout, 0);
-          firstToken = false;
+          first = false;
         }
         process.stdout.write(chunk);
       }
@@ -182,7 +187,7 @@ async function handleCommand(cmd: string) {
     process.stdout.write('\n\n');
   } catch (err: any) {
     if (err.name === 'AbortError') {
-      console.log(chalk.red('\n✖ Cancelled.\n'));
+      console.log(chalk.red('\n✖ Task cancelled.\n'));
     } else {
       console.log(chalk.red(`\n✖ Error: ${err.message}\n`));
     }
@@ -190,7 +195,7 @@ async function handleCommand(cmd: string) {
     isExecuting = false;
     currentAbortController = null;
     inputBuffer = '';
-    renderUI();
+    renderInput();
   }
 }
 
@@ -201,18 +206,16 @@ if (process.stdin.isTTY) {
 }
 
 
-process.stdin.on('keypress', async (_, key) => {
-  if (!key) return;
-
-
-  if (key.ctrl && key.name === 'c') {
+process.stdin.on('keypress', async (str, key) => {
+  if (key && key.ctrl && key.name === 'c') {
+    erasePopupLines();
     process.stdout.write('\n');
     process.exit(0);
   }
 
 
   if (isExecuting) {
-    if (key.name === 'escape') {
+    if (key && key.name === 'escape') {
       if (escTimer) {
         clearTimeout(escTimer);
         escTimer = null;
@@ -226,58 +229,66 @@ process.stdin.on('keypress', async (_, key) => {
   }
 
 
-  const matches = getFilteredCommands();
-  if (matches.length > 0) {
-    if (key.name === 'down') {
-      selectedSuggestionIndex = (selectedSuggestionIndex + 1) % matches.length;
-      renderUI();
-      return;
-    }
-    if (key.name === 'up') {
-      selectedSuggestionIndex = (selectedSuggestionIndex - 1 + matches.length) % matches.length;
-      renderUI();
-      return;
-    }
-    if (key.name === 'tab') {
-      inputBuffer = matches[selectedSuggestionIndex].cmd;
-      renderUI();
-      return;
-    }
-  }
+  const matches = getMatches();
 
 
-  if (key.name === 'return') {
-    if (matches.length > 0 && inputBuffer.startsWith('/')) {
-      const selectedCmd = matches[selectedSuggestionIndex].cmd;
+  const isEnterKey =
+    (key && (key.name === 'return' || key.name === 'enter')) ||
+    str === '\r' ||
+    str === '\n';
+
+
+  if (isEnterKey) {
+    if (matches.length > 0) {
+      const chosen = matches[selectedIdx].cmd;
       inputBuffer = '';
-      await handleCommand(selectedCmd);
+      await runCommandOrQuery(chosen);
       return;
     }
 
 
-    const query = inputBuffer.trim();
-    if (!query) return;
+    const q = inputBuffer.trim();
+    if (!q) return;
     inputBuffer = '';
-    await handleCommand(query);
+    await runCommandOrQuery(q);
     return;
   }
 
 
-  if (key.name === 'backspace') {
+  if (matches.length > 0) {
+    if (key && key.name === 'down') {
+      selectedIdx = (selectedIdx + 1) % matches.length;
+      renderInput();
+      return;
+    }
+    if (key && key.name === 'up') {
+      selectedIdx = (selectedIdx - 1 + matches.length) % matches.length;
+      renderInput();
+      return;
+    }
+    if (key && (key.name === 'tab' || key.name === 'right')) {
+      inputBuffer = matches[selectedIdx].cmd;
+      renderInput();
+      return;
+    }
+  }
+
+
+  if (key && key.name === 'backspace') {
     inputBuffer = inputBuffer.slice(0, -1);
-    selectedSuggestionIndex = 0;
-    renderUI();
+    selectedIdx = 0;
+    renderInput();
     return;
   }
 
 
-  if (key.sequence && !key.ctrl && !key.meta && key.sequence.length === 1) {
-    inputBuffer += key.sequence;
-    selectedSuggestionIndex = 0;
-    renderUI();
+  if (str && !key?.ctrl && !key?.meta && str.length === 1 && str !== '\r' && str !== '\n') {
+    inputBuffer += str;
+    selectedIdx = 0;
+    renderInput();
   }
 });
 
 
 resetScreen();
-renderUI();
+renderInput();

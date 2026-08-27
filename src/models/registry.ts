@@ -56,6 +56,14 @@ const FALLBACK_CONFIG: ModelsConfig = {
         { id: "llama-3.1-8b-instant", priority: 7, contextWindow: 131072 },
       ],
     },
+    planner: {
+      label: "Task Planning & Decomposition",
+      models: [
+        { id: "gpt-oss-120b", priority: 10, contextWindow: 131072 },
+        { id: "glm-4.7-flash", priority: 9, contextWindow: 131072 },
+        { id: "qwen3-30b-a3b-fp8", priority: 8, contextWindow: 131072 },
+      ],
+    },
     reasoning: {
       label: "Deep Reasoning / Architecture",
       models: [

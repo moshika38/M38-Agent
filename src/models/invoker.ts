@@ -11,6 +11,7 @@ export interface InvokeOptions {
   maxTokens?: number;
   jsonMode?: boolean;
   signal?: AbortSignal;
+  onFallback?: (fromModel: string, toModel: string, reason: string) => void;
 }
 
 export interface InvokeResult {
@@ -92,7 +93,10 @@ export class ModelInvoker {
         errors.push(`${modelId}: ${reason}`);
 
         const nextModel = modelOrder.find((m) => !attempted.has(m.modelId))?.modelId;
-        if (nextModel) logModelSwitch(modelId, nextModel, reason);
+        if (nextModel) {
+          logModelSwitch(modelId, nextModel, reason);
+          opts.onFallback?.(modelId, nextModel, reason);
+        }
 
         // exponential backoff on rate limit (429)
         if (reason.includes("429")) {
@@ -168,7 +172,10 @@ export class ModelInvoker {
         const reason = this.classifyError(err);
         errors.push(`${modelId}: ${reason}`);
         const nextModel = modelOrder.find((m) => !attempted.has(m.modelId))?.modelId;
-        if (nextModel) logModelSwitch(modelId, nextModel, reason);
+        if (nextModel) {
+          logModelSwitch(modelId, nextModel, reason);
+          opts.onFallback?.(modelId, nextModel, reason);
+        }
 
         // exponential backoff on rate limit (429)
         if (reason.includes("429")) {
