@@ -7,8 +7,11 @@ import { TaskRouter } from "./router.js";
 import { type ExecutionPlan, type OrchestratorResult, type FusionResult, type PipelineStage } from "../models/types.js";
 import { MODEL_POOLS, POOL_LABELS, type PoolName } from "../config/models.js";
 import { sessionManager } from "../session/manager.js";
-import { getToolSystemPrompt, parseToolCalls, executeToolCall, formatToolResults } from "./tools.js";
+import { getToolSystemPrompt, parseToolCalls, executeToolCall, formatToolResults, writeFile } from "./tools.js";
 import { pruneConversation } from "./contextManager.js";
+import { spinner } from "../utils/spinner.js";
+import { renderPrettyPlan } from "../utils/planFormatter.js";
+import chalk from "chalk";
 
 export type AgentMode = 'PLAN' | 'BUILD';
 
@@ -34,6 +37,8 @@ export class Orchestrator {
   private router: TaskRouter;
   private quiet: boolean;
 
+  private lastApprovedPlan: string | null = null;
+
   constructor(config: OrchestratorConfig) {
     this.registry = new ModelRegistry(config.configPath);
     this.invoker = new ModelInvoker(config.baseURL, config.apiKey, this.registry);
@@ -41,8 +46,177 @@ export class Orchestrator {
     this.quiet = config.quiet ?? false;
   }
 
+  getLastPlan(): string | null {
+    return this.lastApprovedPlan;
+  }
+
+  clearLastPlan(): void {
+    this.lastApprovedPlan = null;
+  }
+
+  async runTask(prompt: string, mode: AgentMode = 'BUILD', signal?: AbortSignal): Promise<OrchestratorResult> {
+    return this.process(prompt, { mode, signal });
+  }
+
+  async executePlan(planMarkdown: string, signal?: AbortSignal): Promise<void> {
+    spinner.start('Building project files from plan...');
+
+    const systemPrompt = `You are an automated file-generation agent.
+You have tools to create and write files: \`write_file(path, content)\` and \`execute_command(command)\`.
+Your ONLY job right now is to execute the following plan by creating all necessary files with full, production-ready code.
+
+CRITICAL RULES:
+- Do not output conversational preamble or explanations.
+- Immediately call \`write_file\` for each file specified in the plan (HTML, CSS, JS, etc.).
+- Write complete, robust code (no placeholders, TODOs, or truncated sections).
+
+When you need to use a tool, respond with a JSON code block in this exact format:
+\`\`\`tool_call
+{
+  "name": "write_file",
+  "arguments": {
+    "path": "filename.ext",
+    "content": "full content here"
+  }
+}
+\`\`\``;
+
+    const userPrompt = `Execute this plan now and create all files:\n\n${planMarkdown}`;
+
+    try {
+      await this.runToolLoop(systemPrompt, userPrompt, signal);
+    } catch (err: any) {
+      spinner.stop();
+      console.log(chalk.red(`\n✖ Execution failed: ${err.message}\n`));
+    } finally {
+      spinner.stop();
+      this.clearLastPlan();
+    }
+  }
+
+  async runToolLoop(systemPrompt: string, userPrompt: string, signal?: AbortSignal): Promise<void> {
+    let iterations = 0;
+    const maxIterations = 15;
+
+    let messages: ChatCompletionMessageParam[] = [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: userPrompt }
+    ];
+
+    while (iterations < maxIterations) {
+      if (signal?.aborted) break;
+      iterations++;
+      spinner.start('Thinking & Executing...');
+
+      const invokeOpts: InvokeOptions = {
+        messages,
+        preferredPool: 'coding',
+        temperature: 0.2,
+        jsonMode: false,
+        signal,
+      };
+
+      const result = await this.invoker.invoke(invokeOpts);
+      const toolCalls = parseToolCalls(result.content);
+
+      // Handle tool call executions
+      if (toolCalls.length > 0) {
+        spinner.stop();
+        const toolResults = await Promise.all(toolCalls.map((tc) => executeToolCall(tc, 'BUILD')));
+
+        for (let i = 0; i < toolCalls.length; i++) {
+          const tc = toolCalls[i];
+          const res = toolResults[i];
+          if (res) {
+            if (res.success) {
+              if (tc.name === "write_file" || tc.name === "create_file") {
+                const path = tc.arguments.path || (tc.arguments as any).filePath;
+                console.log(chalk.green(`✔ Created file: ${chalk.bold(path)}`));
+              } else if (tc.name === "execute_command" || tc.name === "run_command" || tc.name === "bash") {
+                const cmd = tc.arguments.command || (tc.arguments as any).cmd;
+                console.log(chalk.yellow(`✔ Executed: ${chalk.bold(cmd)}`));
+              } else if (tc.name === "read_file") {
+                const path = tc.arguments.path || (tc.arguments as any).filePath;
+                console.log(chalk.cyan(`✔ Read file: ${chalk.bold(path)}`));
+              }
+            } else {
+              console.log(chalk.red(`✖ Error in ${tc.name}: ${res.content}`));
+            }
+          }
+        }
+
+        // Push assistant response and tool execution results back to messages
+        messages.push({ role: 'assistant', content: result.content });
+        messages.push({
+          role: 'user',
+          content: `Tool execution results:\n\n${formatToolResults(toolResults)}\n\nContinue with next steps (writing files, running commands, etc.). If all files are generated and tasks are completed, output 'DONE'.`
+        });
+
+        // Continue next iteration so the model can write files after reconnaissance
+        continue;
+      }
+
+      // If model finished without formal tool calls
+      spinner.stop();
+      if (result.content) {
+        const extractedFiles = this.extractCodeBlocksToFiles(result.content);
+        if (extractedFiles.length > 0) {
+          for (const file of extractedFiles) {
+            writeFile(file.name, file.content);
+            console.log(chalk.green(`✔ Created file: ${chalk.bold(file.name)}`));
+          }
+        } else if (!result.content.includes('DONE')) {
+          process.stdout.write(result.content + '\n');
+        }
+      }
+      break;
+    }
+    console.log(chalk.hex('#10B981').bold('\n✨ All files generated successfully!\n'));
+  }
+
+  private extractCodeBlocksToFiles(text: string): Array<{ name: string; content: string }> {
+    const files: Array<{ name: string; content: string }> = [];
+
+    const annotatedRegex = /(?:(?:\/\*|<!--|\/\/|#+)\s*([\w\d_./-]+\.[\w\d]+)\s*(?:\*\/|-->)?\s*\n)?```(?:html|css|javascript|js|typescript|ts|json|jsx|tsx|python|py|sh|bash)?\s*\n([\s\S]*?)```/gi;
+
+    let match;
+    while ((match = annotatedRegex.exec(text)) !== null) {
+      let fileName = match[1];
+      const content = match[2];
+
+      if (!fileName && content) {
+        const firstLineMatch = content.match(/^(?:(?:\/\*|<!--|\/\/|#+)\s*([\w\d_./-]+\.[\w\d]+)\s*(?:\*\/|-->)?)/i);
+        if (firstLineMatch && firstLineMatch[1]) {
+          fileName = firstLineMatch[1];
+        }
+      }
+
+      if (fileName && content && content.trim()) {
+        files.push({ name: fileName.trim(), content });
+      }
+    }
+
+    if (files.length === 0) {
+      const headerRegex = /(?:`([\w\d_./-]+\.[\w\d]+)`|\*\*([\w\d_./-]+\.[\w\d]+)\*\*|File:\s*`?([\w\d_./-]+\.[\w\d]+)`?)[^\n]*\n+```(?:html|css|javascript|js|typescript|ts|json|jsx|tsx|python|py|sh|bash)?\s*\n([\s\S]*?)```/gi;
+      let hMatch;
+      while ((hMatch = headerRegex.exec(text)) !== null) {
+        const fileName = hMatch[1] || hMatch[2] || hMatch[3];
+        const content = hMatch[4];
+        if (fileName && content && content.trim()) {
+          files.push({ name: fileName.trim(), content });
+        }
+      }
+    }
+
+    return files;
+  }
+
   getRegistry(): ModelRegistry {
     return this.registry;
+  }
+
+  setApiKey(apiKey: string, baseURL?: string): void {
+    this.invoker = new ModelInvoker(baseURL || 'https://api.freellm.in/v1', apiKey, this.registry);
   }
 
   async process(
@@ -104,11 +278,58 @@ export class Orchestrator {
     if (!this.quiet) {
       const modeBadge = mode === 'PLAN' ? '\x1b[36m[PLAN]\x1b[0m' : '\x1b[38;2;245;166;35m[BUILD]\x1b[0m';
       const badge = `\x1b[38;2;245;166;35m[◆ M38]\x1b[0m ${modeBadge} Task: ${poolLabel} \x1b[38;2;245;166;35m➔\x1b[0m Primary: ${primaryModel}`;
-      process.stdout.write(badge + '\n');
+      process.stdout.write(badge + '\n\n');
+      spinner.start('Thinking...');
     }
 
     // ── Record user message to session ──────────────────────
     sessionManager.addMessage('user', userPrompt);
+
+    // ── PLAN mode override ───────────────────────────────────
+    if (mode === 'PLAN') {
+      spinner.start('Architecting solution blueprint...');
+      const systemPrompt = this.buildSystemPrompt(plan, opts.systemPrompt, 'PLAN');
+      const prunedHistory = opts.conversationHistory ? pruneConversation(opts.conversationHistory) : [];
+      const messages = this.buildMessages(systemPrompt, fullPrompt, prunedHistory, allImages);
+
+      let fullPlanMarkdown = '';
+
+      const result = await this.invoker.streamCompletion({
+        model: primaryModel,
+        messages: [
+          {
+            role: 'system',
+            content: `You are a Principal Software Architect. Output a concise, well-structured markdown blueprint:
+### 1. Architecture & Tech Stack
+### 2. Files to Create/Modify
+- \`filename\`: Brief purpose & responsibilities
+### 3. Implementation Steps
+Keep it scannable with bullet points, short descriptions, and code blocks only where essential.`
+          },
+          ...messages
+        ],
+        signal: opts.signal,
+        onToken: (chunk) => {
+          fullPlanMarkdown += chunk;
+        }
+      });
+
+      spinner.stop();
+      renderPrettyPlan(fullPlanMarkdown);
+      this.lastApprovedPlan = fullPlanMarkdown;
+
+      sessionManager.addMessage('assistant', fullPlanMarkdown);
+
+      return {
+        plan,
+        response: fullPlanMarkdown,
+        modelUsed: result.modelUsed,
+        poolUsed: result.poolUsed,
+        primaryModel,
+        attempts: result.attempts,
+        totalMs: result.totalMs,
+      };
+    }
 
     // ── Pipeline execution ───────────────────────────────────
     if (plan.pipeline && plan.pipeline.length > 0) {
@@ -224,7 +445,7 @@ export class Orchestrator {
       const isFinal = i === stages.length - 1;
 
       const stageSystemPrompt = this.buildStageSystemPrompt(stage, plan);
-      const messages = this.buildMessages(stageSystemPrompt, accumulatedContext);
+      const messages = this.buildMessages(stageSystemPrompt, accumulatedContext, [], opts.images);
 
       const invokeOpts: InvokeOptions = {
         messages,
@@ -232,17 +453,30 @@ export class Orchestrator {
         temperature: stage.temperature ?? 0.7,
         jsonMode: false,
         signal: opts.signal,
-        onFallback: (from, to, reason) => {
-          if (!this.quiet) {
-            const cleanReason = reason.replace(/ \(.+\)/, '');
-            process.stdout.write(`\n\x1b[33m[⟳ Fallback] ${from} ➔ ${to} (${cleanReason})\x1b[0m\n`);
-          }
-        },
       };
 
       let result;
       if (isFinal && opts.onStreamChunk) {
-        result = await this.invoker.invokeStreaming(invokeOpts, opts.onStreamChunk);
+        let isFirstToken = true;
+        let streamedText = ""; // Reset the stream accumulator buffer before calling
+        const poolModel = this.getPrimaryModel(stage.pool);
+        result = await this.invoker.streamCompletion({
+          model: poolModel,
+          messages,
+          signal: opts.signal,
+          temperature: stage.temperature ?? 0.7,
+          onToken: (chunk) => {
+            if (isFirstToken) {
+              spinner.stop(); // Clears spinner line completely: \r\x1b[2K
+              isFirstToken = false;
+            }
+            streamedText += chunk;
+            process.stdout.write(chunk);
+            if (opts.onStreamChunk) {
+              opts.onStreamChunk(chunk);
+            }
+          }
+        });
         if (opts.onRouting && !this.quiet) {
           opts.onRouting(result.modelUsed, result.poolUsed, result.totalMs);
         }
@@ -334,18 +568,12 @@ export class Orchestrator {
       ? pruneConversation(opts.conversationHistory)
       : [];
 
-    let messages = this.buildMessages(toolPrompt, userPrompt, prunedHistory);
+    let messages = this.buildMessages(toolPrompt, userPrompt, prunedHistory, opts.images);
     const invokeOptsBase: Omit<InvokeOptions, "messages"> = {
       preferredPool: pool,
       temperature: plan.complexity === "low" ? 0.3 : 0.7,
       jsonMode: false,
       signal: opts.signal,
-      onFallback: (from, to, reason) => {
-        if (!this.quiet) {
-          const cleanReason = reason.replace(/ \(.+\)/, "");
-          process.stdout.write(`\n\x1b[33m[⟳ Fallback] ${from} ➔ ${to} (${cleanReason})\x1b[0m\n`);
-        }
-      },
     };
 
     const MAX_TOOL_ROUNDS = mode === 'PLAN' ? 0 : 5;
@@ -373,10 +601,6 @@ export class Orchestrator {
           const abortErr = err instanceof Error ? err : new Error('Task was aborted.');
           abortErr.name = 'AbortError';
           throw abortErr;
-        }
-        const msg = err instanceof Error ? err.message : String(err);
-        if (!this.quiet) {
-          process.stdout.write(`\n\x1b[31m[!] Stream error: ${msg.slice(0, 120)}\x1b[0m\n`);
         }
         break;
       }
@@ -422,40 +646,6 @@ export class Orchestrator {
       finalResponse = result.content;
     }
 
-    // In PLAN mode, run one final pass without tools to get the plan output
-    if (mode === 'PLAN' && MAX_TOOL_ROUNDS === 0) {
-      try {
-        if (opts.onStreamChunk) {
-          const result = await this.invokeWithToolInterception(
-            { ...invokeOptsBase, messages },
-            opts.onStreamChunk
-          );
-          finalResponse = result.content;
-          lastModelUsed = result.modelUsed;
-          lastPoolUsed = result.poolUsed;
-          totalAttempts += result.attempts;
-          totalMs += result.totalMs;
-        } else {
-          const result = await this.invoker.invoke({ ...invokeOptsBase, messages });
-          finalResponse = result.content;
-          lastModelUsed = result.modelUsed;
-          lastPoolUsed = result.poolUsed;
-          totalAttempts += result.attempts;
-          totalMs += result.totalMs;
-        }
-      } catch (err: unknown) {
-        if (opts.signal?.aborted || (err instanceof Error && (err.name === 'AbortError' || err.message?.includes('aborted')))) {
-          const abortErr = err instanceof Error ? err : new Error('Task was aborted.');
-          abortErr.name = 'AbortError';
-          throw abortErr;
-        }
-        const msg = err instanceof Error ? err.message : String(err);
-        if (!this.quiet) {
-          process.stdout.write(`\n\x1b[31m[!] Stream error: ${msg.slice(0, 120)}\x1b[0m\n`);
-        }
-      }
-    }
-
     if (opts.onRouting && !this.quiet) {
       opts.onRouting(lastModelUsed, lastPoolUsed, totalMs);
     }
@@ -479,37 +669,52 @@ export class Orchestrator {
     let inToolCallBlock = false;
     let toolCallBuffer = "";
     let conversationalBuffer = "";
-    let firstChunk = true;
+    let isFirstToken = true;
+    let streamedText = ""; // Reset stream accumulator buffer
 
-    const result = await this.invoker.invokeStreaming(invokeOpts, (chunk: string) => {
-      fullContent += chunk;
+    const model = invokeOpts.preferredModel || this.getPrimaryModel(invokeOpts.preferredPool || "fast");
 
-      for (let i = 0; i < chunk.length; i++) {
-        const char = chunk[i];
-        const remaining = chunk.slice(i);
-
-        if (!inToolCallBlock && remaining.startsWith("```tool_call")) {
-          inToolCallBlock = true;
-          toolCallBuffer += "```tool_call";
-          i += "```tool_call".length - 1;
-          continue;
+    const result = await this.invoker.streamCompletion({
+      model,
+      messages: invokeOpts.messages,
+      signal: invokeOpts.signal,
+      temperature: invokeOpts.temperature,
+      jsonMode: invokeOpts.jsonMode,
+      onToken: (chunk) => {
+        if (isFirstToken) {
+          spinner.stop(); // Clears spinner line completely: \r\x1b[2K
+          isFirstToken = false;
         }
+        streamedText += chunk;
+        fullContent += chunk;
 
-        if (inToolCallBlock) {
-          toolCallBuffer += char;
-          if (remaining.startsWith("```")) {
-            inToolCallBlock = false;
-            toolCallBuffer += "```";
-            i += "```".length - 1;
+        for (let i = 0; i < chunk.length; i++) {
+          const char = chunk[i];
+          const remaining = chunk.slice(i);
+
+          if (!inToolCallBlock && remaining.startsWith("```tool_call")) {
+            inToolCallBlock = true;
+            toolCallBuffer += "```tool_call";
+            i += "```tool_call".length - 1;
+            continue;
           }
-          continue;
-        }
 
-        conversationalBuffer += char;
-        if (firstChunk) {
-          firstChunk = false;
+          if (inToolCallBlock) {
+            toolCallBuffer += char;
+            if (remaining.startsWith("```")) {
+              inToolCallBlock = false;
+              toolCallBuffer += "```";
+              i += "```".length - 1;
+            }
+            continue;
+          }
+
+          conversationalBuffer += char;
+          process.stdout.write(char);
+          if (onStreamChunk) {
+            onStreamChunk(char);
+          }
         }
-        onStreamChunk(char);
       }
     });
 
@@ -538,7 +743,7 @@ export class Orchestrator {
   ): Promise<OrchestratorResult> {
     const mode = opts.mode ?? 'BUILD';
     const systemPrompt = this.buildSystemPrompt(plan, opts.systemPrompt, mode);
-    const messages = this.buildMessages(systemPrompt, userPrompt, opts.conversationHistory);
+    const messages = this.buildMessages(systemPrompt, userPrompt, opts.conversationHistory, opts.images);
 
     const promises = fusionPools.map(async (pool) => {
       try {
@@ -547,12 +752,6 @@ export class Orchestrator {
           preferredPool: pool,
           temperature: 0.7,
           signal: opts.signal,
-          onFallback: (from, to, reason) => {
-            if (!this.quiet) {
-              const cleanReason = reason.replace(/ \(.+\)/, '');
-              process.stdout.write(`\n\x1b[33m[⟳ Fallback] ${from} ➔ ${to} (${cleanReason})\x1b[0m\n`);
-            }
-          },
         });
       } catch {
         return null;
@@ -683,7 +882,8 @@ export class Orchestrator {
   private buildMessages(
     systemPrompt: string,
     userPrompt: string,
-    history?: ChatCompletionMessageParam[]
+    history?: ChatCompletionMessageParam[],
+    images?: string[]
   ): ChatCompletionMessageParam[] {
     const messages: ChatCompletionMessageParam[] = [
       { role: "system", content: systemPrompt },
@@ -693,7 +893,30 @@ export class Orchestrator {
       messages.push(...history);
     }
 
-    messages.push({ role: "user", content: userPrompt });
+    if (images && images.length > 0) {
+      const contentParts: any[] = [{ type: "text", text: userPrompt }];
+      for (const img of images) {
+        let base64Data = img;
+        if (!img.startsWith("data:")) {
+          try {
+            const resolvedPath = resolve(process.cwd(), img.replace(/^~/, process.env.HOME || ''));
+            if (existsSync(resolvedPath)) {
+              const fileBuffer = readFileSync(resolvedPath);
+              let ext = extname(resolvedPath).toLowerCase().substring(1);
+              if (ext === 'jpg') ext = 'jpeg';
+              base64Data = `data:image/${ext};base64,${fileBuffer.toString('base64')}`;
+            }
+          } catch {}
+        }
+        contentParts.push({
+          type: "image_url",
+          image_url: { url: base64Data }
+        });
+      }
+      messages.push({ role: "user", content: contentParts as any });
+    } else {
+      messages.push({ role: "user", content: userPrompt });
+    }
     return messages;
   }
 

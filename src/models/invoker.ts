@@ -120,6 +120,26 @@ export class ModelInvoker {
     );
   }
 
+  async streamCompletion(opts: {
+    model: string;
+    messages: ChatCompletionMessageParam[];
+    signal?: AbortSignal;
+    onToken: (chunk: string) => void;
+    temperature?: number;
+    maxTokens?: number;
+    jsonMode?: boolean;
+  }): Promise<InvokeResult> {
+    const invokeOpts: InvokeOptions = {
+      messages: opts.messages,
+      preferredModel: opts.model,
+      temperature: opts.temperature,
+      maxTokens: opts.maxTokens,
+      jsonMode: opts.jsonMode,
+      signal: opts.signal,
+    };
+    return this.invokeStreaming(invokeOpts, opts.onToken);
+  }
+
   async invokeStreaming(
     opts: InvokeOptions,
     onChunk: (chunk: string) => void

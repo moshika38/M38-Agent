@@ -21,11 +21,8 @@ export function logStep(step: number, total: number, msg: string): void {
   console.log(`${tag} ${msg}`);
 }
 
-export function logModelSwitch(from: string, to: string, reason: string): void {
-  console.log(
-    chalk.yellow("⟳") +
-      ` Fallback: ${chalk.red(from)} → ${chalk.green(to)} (${reason})`
-  );
+export function logModelSwitch(_from: string, _to: string, _reason: string): void {
+  // Silent fallback - no stdout logging
 }
 
 export function timer(): { elapsed: () => number; stop: () => string } {

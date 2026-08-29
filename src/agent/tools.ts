@@ -166,8 +166,11 @@ export async function executeToolCall(call: ToolCall, mode?: AgentMode): Promise
       case "read_file":
         return executeReadFile(call);
       case "write_file":
+      case "create_file":
         return executeWriteFile(call);
       case "execute_command":
+      case "run_command":
+      case "bash":
         return executeCommand(call);
       default:
         return {
@@ -189,7 +192,7 @@ export async function executeToolCall(call: ToolCall, mode?: AgentMode): Promise
 }
 
 function executeReadFile(call: ToolCall): ToolResult {
-  const relPath = call.arguments.path;
+  const relPath = call.arguments.path || (call.arguments as any).filePath;
   if (!relPath) {
     return { tool_call_id: call.id, name: call.name, content: "Error: path parameter required", success: false };
   }
@@ -209,7 +212,7 @@ function executeReadFile(call: ToolCall): ToolResult {
 }
 
 function executeWriteFile(call: ToolCall): ToolResult {
-  const relPath = call.arguments.path;
+  const relPath = call.arguments.path || (call.arguments as any).filePath;
   const content = call.arguments.content;
   if (!relPath || content === undefined) {
     return { tool_call_id: call.id, name: call.name, content: "Error: path and content parameters required", success: false };
@@ -233,7 +236,7 @@ function executeWriteFile(call: ToolCall): ToolResult {
 }
 
 async function executeCommand(call: ToolCall): Promise<ToolResult> {
-  const command = call.arguments.command;
+  const command = call.arguments.command || (call.arguments as any).cmd;
   if (!command) {
     return { tool_call_id: call.id, name: call.name, content: "Error: command parameter required", success: false };
   }
@@ -273,4 +276,13 @@ export function formatToolResults(results: ToolResult[]): string {
       return `[Tool ${status} ${r.name}]\n${r.content}`;
     })
     .join("\n\n");
+}
+
+export function writeFile(relPath: string, content: string): void {
+  const absPath = resolve(WORKSPACE_ROOT, relPath);
+  const dir = dirname(absPath);
+  if (!existsSync(dir)) {
+    mkdirSync(dir, { recursive: true });
+  }
+  writeFileSync(absPath, content, "utf-8");
 }
